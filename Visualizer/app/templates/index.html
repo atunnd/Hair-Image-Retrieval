@@ -1,19 +1,21 @@
 {% extends "base.html" %}
 
 {% block content %}
-<h1 class="text-2xl font-bold mb-4">Hairstyle Retrieval Viewer</h1>
+<h1 class="text-2xl font-bold mb-4">Hairstyle Retrieval Visualizer v2.0</h1>
 
 {% if not queries %}
-    <div class="text-center p-4 text-red-500">No queries available. Check JSON data.</div>
+    <div class="text-center p-4 text-red-500">No queries available. Check dataset configuration.</div>
 {% else %}
-    <form method="post" class="mb-4 space-y-4">
-        <!-- Benchmark Selection -->
-        <div class="flex flex-wrap gap-4 items-center">
+    <form method="post" class="mb-6 space-y-4">
+        <!-- Dataset Selection -->
+        <div class="flex flex-wrap gap-4 items-center bg-gray-50 p-4 rounded-lg">
             <div class="flex gap-2">
-                <label class="mr-2 font-semibold">Benchmark:</label>
-                <select name="benchmark" class="p-2 border rounded">
-                    {% for bench_key, bench_config in benchmarks.items() %}
-                        <option value="{{ bench_key }}" {% if bench_key == selected_benchmark %}selected{% endif %}>{{ bench_config.name }}</option>
+                <label class="mr-2 font-semibold">Dataset:</label>
+                <select name="dataset" class="p-2 border rounded" onchange="this.form.submit()">
+                    {% for dataset_key, dataset_config in datasets.items() %}
+                        <option value="{{ dataset_key }}" {% if dataset_key == selected_dataset %}selected{% endif %}>
+                            {{ dataset_config.name }}
+                        </option>
                     {% endfor %}
                 </select>
             </div>
@@ -28,38 +30,30 @@
             </div>
         </div>
         
-        <!-- Model and Version Selection -->
-        <div class="space-y-2">
-            <label class="font-semibold">Models & Versions:</label>
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {% for i in range(2) %}
-                    <div class="border rounded p-3">
-                        <h4 class="font-medium mb-2">Model {{ i + 1 }}</h4>
-                        <div class="space-y-2">
-                            <div>
-                                <label class="block text-sm">Model:</label>
-                                <select name="models" class="w-full p-2 border rounded">
-                                    {% for model in models %}
-                                        <option value="{{ model }}" {% if i < selected_models|length and model == selected_models[i] %}selected{% endif %}>{{ model }}</option>
-                                    {% endfor %}
-                                </select>
-                            </div>
-                            <div>
-                                <label class="block text-sm">Version:</label>
-                                <select name="model_versions" class="w-full p-2 border rounded">
-                                    {% for version in model_versions %}
-                                        <option value="{{ version }}" {% if i < selected_model_versions|length and version == selected_model_versions[i] %}selected{% endif %}>{{ version }}</option>
-                                    {% endfor %}
-                                </select>
-                            </div>
+        <!-- Model Selection -->
+        <div class="bg-gray-50 p-4 rounded-lg">
+            <label class="font-semibold block mb-2">Models to Compare:</label>
+            <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+                {% for model_key, model_config in models.items() %}
+                    <label class="flex items-center space-x-2">
+                        <input
+                            type="checkbox"
+                            name="models"
+                            value="{{ model_key }}"
+                            {% if model_key in selected_models %}checked{% endif %}
+                            class="mr-1"
+                        />
+                        <div>
+                            <div class="font-medium">{{ model_config.name }}</div>
+                            <div class="text-xs text-gray-600">{{ model_config.description }}</div>
                         </div>
-                    </div>
+                    </label>
                 {% endfor %}
             </div>
         </div>
         
         <!-- Options -->
-        <div class="flex flex-wrap gap-4 items-center">
+        <div class="flex flex-wrap gap-4 items-center bg-gray-50 p-4 rounded-lg">
             <div>
                 <label class="mr-2 font-semibold">View Mode:</label>
                 <label class="mr-4">
@@ -91,131 +85,125 @@
                     {% if show_only_correct %}checked{% endif %}
                     class="mr-1"
                 />
-                Show Only Correct
+                Show Only Correct Results
             </label>
-            <button type="submit" class="px-6 py-2 bg-blue-500 text-white rounded hover:bg-blue-600">Update</button>
+            <button type="submit" class="px-6 py-2 bg-blue-500 text-white rounded hover:bg-blue-600">
+                Update Results
+            </button>
         </div>
     </form>
 
-    <div class="mb-4">
-        <h3 class="text-xl font-semibold mb-2">Query and Ground Truth</h3>
-        <div class="flex flex-nowrap gap-4 overflow-x-auto">
-            <div class="flex flex-col items-center">
-                <p class="text-sm">Query</p>
-                {% if selected_benchmark == "korean" %}
-                    <img
-                        src="/korean_images/{{ selected_query }}_query.jpg"
-                        alt="Query {{ selected_query }}"
-                        class="w-20 h-20 object-cover rounded"
-                    />
-                {% else %}
-                    <img
-                        src="{% if view_mode == 'hair' %}/hair_images/{{ selected_query }}_hair.png{% else %}/face_images/{{ selected_query }}.jpg{% endif %}"
-                        alt="Query {{ selected_query }}"
-                        class="w-20 h-20 object-cover rounded"
-                    />
-                {% endif %}
+    <!-- Query and Ground Truth Section -->
+    <div class="mb-6">
+        <h3 class="text-xl font-semibold mb-3">Query and Ground Truth</h3>
+        <div class="flex flex-nowrap gap-4 overflow-x-auto bg-gray-50 p-4 rounded-lg">
+            <div class="flex flex-col items-center min-w-0">
+                <p class="text-sm font-medium mb-2">Query Image</p>
+                <img
+                    src="{{ query_image_path }}"
+                    alt="Query {{ selected_query }}"
+                    class="w-24 h-24 object-cover rounded border-2 border-blue-500"
+                />
+                <p class="text-xs mt-1">{{ selected_query }}</p>
             </div>
-            {% if display_models and results %}
-                {% set first_result_key = results.keys() | list | first %}
-                {% if first_result_key and results[first_result_key] and results[first_result_key].ground_truth %}
-                    {% for gt in results[first_result_key].ground_truth %}
-                        <div class="flex flex-col items-center">
-                            <p class="text-sm">Ground Truth</p>
+            
+            {% if results %}
+                {% set first_result = results[results.keys() | list | first] %}
+                {% if first_result.ground_truth %}
+                    {% for gt_path in first_result.ground_truth %}
+                        <div class="flex flex-col items-center min-w-0">
+                            <p class="text-sm font-medium mb-2">Ground Truth</p>
                             <img
-                                src="{{ gt }}"
-                                alt="Ground Truth {{ gt }}"
-                                class="w-20 h-20 object-cover rounded border-2 border-blue-500"
-                                title="{{ gt }}"
+                                src="{{ gt_path }}"
+                                alt="Ground Truth"
+                                class="w-24 h-24 object-cover rounded border-2 border-green-500"
                             />
                         </div>
                     {% endfor %}
                 {% else %}
-                    <div class="text-center p-4 text-red-500">No ground truth available for query {{ selected_query }}</div>
+                    <div class="text-center p-4 text-orange-600">
+                        No ground truth available for this query
+                    </div>
                 {% endif %}
             {% endif %}
         </div>
     </div>
 
-    <hr class="my-4" />
+    <hr class="my-6" />
 
+    <!-- Results Section -->
     {% if results %}
-        <div class="flex flex-row gap-4">
-            {% for result_key, res in results.items() %}
-                {% if res and res.top100 %}
-                    <div class="w-1/2">
-                        <h3 class="text-xl font-semibold mb-2">
-                            Model: {{ res.model_name | title }} 
-                            <span class="text-lg text-gray-600">({{ res.version }})</span>
-                        </h3>
-                        <div class="max-h-[600px] overflow-y-auto border rounded p-2">
-                            <div class="flex flex-wrap gap-4">
-                            {% for img in res.top100 %}
-                                {% set check_id = img.hair | replace('/hair_images/', '') | replace('_hair.png', '.jpg') %}
-
-                                {% set ns = namespace(is_correct=false) %}
-                                {% for gt in res.ground_truth %}
-                                    {% set gt_id = gt | replace('/face_images/', '') %}
-                                    {% if check_id == gt_id %}
-                                        {% set ns.is_correct = true %}
-                                    {% endif %}
-                                {% endfor %}
-
-                                
-                                <div class="flex flex-col items-center">
-                                    <img
-                                        src="{{ img.hair if view_mode == 'hair' else img.face }}"
-                                        class="w-20 h-20 object-cover rounded border-2 {% if ns.is_correct %}border-green-500{% else %}border-gray-300{% endif %}"
-                                        title="{{ check_id }} • {% if ns.is_correct %}✅{% else %}❌{% endif %}"
-                                    />
-                                    {% if ns.is_correct %}
-                                        <p class="text-xs text-green-500 mt-1">✅ Correct</p>
-                                    {% endif %}
-                                </div>
-                            {% endfor %}
-
-
+        <div class="grid grid-cols-1 {% if results | length > 1 %}lg:grid-cols-2{% endif %} gap-6">
+            {% for model_key, result in results.items() %}
+                <div class="border rounded-lg p-4">
+                    <div class="flex justify-between items-start mb-4">
+                        <div>
+                            <h3 class="text-xl font-semibold">{{ result.model_name }}</h3>
+                            <p class="text-sm text-gray-600">{{ result.model_description }}</p>
+                        </div>
+                        <div class="text-right text-sm">
+                            <div class="text-green-600 font-medium">
+                                ✅ {{ result.stats.hits_count }}/{{ result.stats.total_results }} hits
+                            </div>
+                            <div class="text-gray-500">
+                                Accuracy: {{ "%.1f" | format(result.stats.accuracy * 100) }}%
                             </div>
                         </div>
                     </div>
-                {% else %}
-                    <div class="w-1/2 text-center p-4 text-red-500">No results available for {{ result_key }}</div>
-                {% endif %}
+                    
+                    <div class="max-h-[500px] overflow-y-auto border rounded p-2">
+                        <div class="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 gap-2">
+                            {% for img_pair in result.top100 %}
+                                {% set img_filename = img_pair.hair.split('/')[-1] %}
+                                {% set is_hit = img_pair in result.hits %}
+                                
+                                <div class="flex flex-col items-center">
+                                    <img
+                                        src="{{ img_pair.hair if view_mode == 'hair' else img_pair.face }}"
+                                        class="w-16 h-16 object-cover rounded border-2 {% if is_hit %}border-green-500{% else %}border-gray-300{% endif %}"
+                                        title="{{ img_filename }} • {% if is_hit %}✅ Correct{% else %}❌ Incorrect{% endif %}"
+                                    />
+                                    {% if is_hit %}
+                                        <div class="text-xs text-green-600 mt-1">✅</div>
+                                    {% endif %}
+                                </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
             {% endfor %}
         </div>
     {% else %}
-        <div class="text-center p-4 text-red-500">No model results to display</div>
+        <div class="text-center p-8 text-gray-500">
+            <p class="text-lg">No model results to display</p>
+            <p class="text-sm">Please select at least one model to compare.</p>
+        </div>
     {% endif %}
 {% endif %}
 
+<!-- Navigation -->
 <div class="mt-8 flex justify-center gap-8">
-  <form method="post">
-    <input type="hidden" name="benchmark" value="{{ selected_benchmark }}">
-    <input type="hidden" name="query_index" value="{{ query_index - 1 if query_index > 0 else queries | length - 1 }}">
-    <input type="hidden" name="view_mode" value="{{ view_mode }}">
-    <input type="hidden" name="show_only_correct" value="{{ 'true' if show_only_correct else '' }}">
-    {% for model in selected_models %}
-      <input type="hidden" name="models" value="{{ model }}">
-    {% endfor %}
-    {% for version in selected_model_versions %}
-      <input type="hidden" name="model_versions" value="{{ version }}">
-    {% endfor %}
-    <button type="submit" class="px-4 py-2 bg-gray-200 rounded">← Previous</button>
-  </form>
+    <form method="post">
+        <input type="hidden" name="dataset" value="{{ selected_dataset }}">
+        <input type="hidden" name="query_index" value="{{ query_index - 1 if query_index > 0 else queries | length - 1 }}">
+        <input type="hidden" name="view_mode" value="{{ view_mode }}">
+        <input type="hidden" name="show_only_correct" value="{{ 'true' if show_only_correct else '' }}">
+        {% for model in selected_models %}
+            <input type="hidden" name="models" value="{{ model }}">
+        {% endfor %}
+        <button type="submit" class="px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded">← Previous</button>
+    </form>
 
-  <form method="post">
-    <input type="hidden" name="benchmark" value="{{ selected_benchmark }}">
-    <input type="hidden" name="query_index" value="{{ query_index + 1 if query_index < queries | length - 1 else 0 }}">
-    <input type="hidden" name="view_mode" value="{{ view_mode }}">
-    <input type="hidden" name="show_only_correct" value="{{ 'true' if show_only_correct else '' }}">
-    {% for model in selected_models %}
-      <input type="hidden" name="models" value="{{ model }}">
-    {% endfor %}
-    {% for version in selected_model_versions %}
-      <input type="hidden" name="model_versions" value="{{ version }}">
-    {% endfor %}
-    <button type="submit" class="px-4 py-2 bg-gray-200 rounded">Next →</button>
-  </form>
+    <form method="post">
+        <input type="hidden" name="dataset" value="{{ selected_dataset }}">
+        <input type="hidden" name="query_index" value="{{ query_index + 1 if query_index < queries | length - 1 else 0 }}">
+        <input type="hidden" name="view_mode" value="{{ view_mode }}">
+        <input type="hidden" name="show_only_correct" value="{{ 'true' if show_only_correct else '' }}">
+        {% for model in selected_models %}
+            <input type="hidden" name="models" value="{{ model }}">
+        {% endfor %}
+        <button type="submit" class="px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded">Next →</button>
+    </form>
 </div>
 
 {% endblock %}
