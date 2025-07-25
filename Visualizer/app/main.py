@@ -49,6 +49,7 @@ async def index(
     query_id: str = Form(None),
     query_index: int = Form(0),
     models: list = Form(["dino", "simmim"]),
+    model_versions: dict = Form({}),
     show_only_correct: bool = Form(False),
     view_mode: str = Form("full")
 ):
@@ -79,12 +80,21 @@ async def index(
     
     # Process results for each model
     results = {}
+    all_versions = data_manager.get_all_available_versions()
+    
     for model in display_models:
         if model not in available_models:
             continue
+        
+        # Get version to use for this model
+        version = model_versions.get(model)
+        if not version:
+            # Use first available version if none specified
+            available_versions = data_manager.get_available_versions(dataset, model)
+            version = available_versions[0] if available_versions else "10k"
             
-        # Get model results
-        model_results_raw = data_manager.get_model_results(dataset, model)
+        # Get model results with specific version
+        model_results_raw = data_manager.get_model_results(dataset, model, version)
         query_key = ResultProcessor.get_query_key(dataset, selected_query)
         model_result = model_results_raw.get(query_key, [])
         
@@ -117,6 +127,8 @@ async def index(
         results[model] = {
             "model_name": MODELS[model]["name"],
             "model_description": MODELS[model]["description"],
+            "version": version,
+            "available_versions": data_manager.get_available_versions(dataset, model),
             "top100": result_images,
             "ground_truth": ImagePathResolver.get_ground_truth_paths(dataset, ground_truth),
             "hits": hit_images,
@@ -145,13 +157,15 @@ async def index(
             "query_index": query_index,
             "selected_query": selected_query,
             "selected_models": models,
+            "model_versions": model_versions,
             "display_models": display_models,
             "show_only_correct": show_only_correct,
             "view_mode": view_mode,
             "query_image_path": query_image_path,
             "results": results,
             "available_datasets": available_datasets,
-            "available_models": available_models
+            "available_models": available_models,
+            "all_versions": all_versions
         }
     )
 

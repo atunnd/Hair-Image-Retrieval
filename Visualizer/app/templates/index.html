@@ -51,6 +51,28 @@
                 {% endfor %}
             </div>
         </div>
+
+        <!-- Model Version Selection -->
+        <div class="bg-gray-50 p-4 rounded-lg">
+            <label class="font-semibold block mb-2">Model Versions:</label>
+            <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+                {% for model_key in selected_models %}
+                    {% if all_versions.get(selected_dataset, {}).get(model_key, []) %}
+                        <div class="flex flex-col">
+                            <label class="font-medium mb-1">{{ models[model_key].name }}</label>
+                            <select name="model_versions[{{ model_key }}]" class="p-1 border rounded text-sm">
+                                {% for version in all_versions[selected_dataset][model_key] %}
+                                    <option value="{{ version }}" 
+                                        {% if model_versions.get(model_key) == version %}selected{% endif %}>
+                                        {{ version }}
+                                    </option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                    {% endif %}
+                {% endfor %}
+            </div>
+        </div>
         
         <!-- Options -->
         <div class="flex flex-wrap gap-4 items-center bg-gray-50 p-4 rounded-lg">
