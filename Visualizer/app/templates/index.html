@@ -1,0 +1,170 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h1 class="text-2xl font-bold mb-4">Hairstyle Retrieval Viewer</h1>
+
+{% if not queries %}
+    <div class="text-center p-4 text-red-500">No queries available. Check JSON data.</div>
+{% else %}
+    <form method="post" class="mb-4 flex flex-col sm:flex-row gap-4 items-center">
+        <div class="flex gap-2">
+            <label class="mr-2">Query:</label>
+            <select name="query_id" class="p-2 border rounded">
+                {% for query in queries | sort %}
+                    <option value="{{ query }}" {% if query == selected_query %}selected{% endif %}>{{ query }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        
+        <div>
+            <label class="mr-2">Models:</label>
+            {% for model in models %}
+                <label class="mr-4">
+                    <input
+                        type="checkbox"
+                        name="models"
+                        value="{{ model }}"
+                        {% if model in selected_models %}checked{% endif %}
+                        class="mr-1"
+                    />
+                    {{ model }}
+                </label>
+            {% endfor %}
+        </div>
+        <div>
+            <label class="mr-2">View Mode:</label>
+            <label class="mr-4">
+                <input
+                    type="radio"
+                    name="view_mode"
+                    value="full"
+                    {% if view_mode == 'full' %}checked{% endif %}
+                    class="mr-1"
+                />
+                Full Image
+            </label>
+            <label>
+                <input
+                    type="radio"
+                    name="view_mode"
+                    value="hair"
+                    {% if view_mode == 'hair' %}checked{% endif %}
+                    class="mr-1"
+                />
+                Hair Only
+            </label>
+        </div>
+        <label>
+            <input
+                type="checkbox"
+                name="show_only_correct"
+                value="true"
+                {% if show_only_correct %}checked{% endif %}
+                class="mr-1"
+            />
+            Show Only Correct
+        </label>
+        <button type="submit" class="px-4 py-2 bg-blue-500 text-white rounded">Update</button>
+    </form>
+
+    <div class="mb-4">
+        <h3 class="text-xl font-semibold mb-2">Query and Ground Truth</h3>
+        <div class="flex flex-nowrap gap-4 overflow-x-auto">
+            <div class="flex flex-col items-center">
+                <p class="text-sm">Query</p>
+                <img
+                    src="{% if view_mode == 'hair' %}/hair_images/{{ selected_query }}_hair.png{% else %}/face_images/{{ selected_query }}.jpg{% endif %}"
+                    alt="Query {{ selected_query }}"
+                    class="w-20 h-20 object-cover rounded"
+                />
+            </div>
+            {% if display_models and results[display_models[0]] and results[display_models[0]].ground_truth %}
+                {% for gt in results[display_models[0]].ground_truth %}
+                    <div class="flex flex-col items-center">
+                        <p class="text-sm">Ground Truth</p>
+                        <img
+                            src="{{ gt }}"
+                            alt="Ground Truth {{ gt }}"
+                            class="w-20 h-20 object-cover rounded border-2 border-blue-500"
+                            title="{{ gt }}"
+                        />
+                    </div>
+                {% endfor %}
+            {% else %}
+                <div class="text-center p-4 text-red-500">No ground truth available for query {{ selected_query }}</div>
+            {% endif %}
+        </div>
+    </div>
+
+    <hr class="my-4" />
+
+    {% if display_models %}
+        <div class="flex flex-row gap-4">
+            {% for model in display_models %}
+                {% set res = results[model] %}
+                {% if res and res.top100 %}
+                    <div class="w-1/2">
+                        <h3 class="text-xl font-semibold mb-2">Top-100 from Model: {{ model }}</h3>
+                        <div class="max-h-[600px] overflow-y-auto border rounded p-2">
+                            <div class="flex flex-wrap gap-4">
+                            {% for img in res.top100 %}
+                                {% set check_id = img.hair | replace('/hair_images/', '') | replace('_hair.png', '.jpg') %}
+
+                                {% set ns = namespace(is_correct=false) %}
+                                {% for gt in res.ground_truth %}
+                                    {% set gt_id = gt | replace('/face_images/', '') %}
+                                    {% if check_id == gt_id %}
+                                        {% set ns.is_correct = true %}
+                                    {% endif %}
+                                {% endfor %}
+
+                                
+                                <div class="flex flex-col items-center">
+                                    <img
+                                        src="{{ img.hair if view_mode == 'hair' else img.face }}"
+                                        class="w-20 h-20 object-cover rounded border-2 {% if ns.is_correct %}border-green-500{% else %}border-gray-300{% endif %}"
+                                        title="{{ check_id }} • {% if ns.is_correct %}✅{% else %}❌{% endif %}"
+                                    />
+                                    {% if ns.is_correct %}
+                                        <p class="text-xs text-green-500 mt-1">✅ Correct</p>
+                                    {% endif %}
+                                </div>
+                            {% endfor %}
+
+
+                            </div>
+                        </div>
+                    </div>
+                {% else %}
+                    <div class="w-1/2 text-center p-4 text-red-500">No results available for model {{ model }}</div>
+                {% endif %}
+            {% endfor %}
+        </div>
+    {% else %}
+        <div class="text-center p-4 text-red-500">No models selected. Please select at least one model.</div>
+    {% endif %}
+{% endif %}
+
+<div class="mt-8 flex justify-center gap-8">
+  <form method="post">
+    <input type="hidden" name="query_index" value="{{ query_index - 1 if query_index > 0 else queries | length - 1 }}">
+    <input type="hidden" name="view_mode" value="{{ view_mode }}">
+    <input type="hidden" name="show_only_correct" value="{{ 'true' if show_only_correct else '' }}">
+    {% for model in selected_models %}
+      <input type="hidden" name="models" value="{{ model }}">
+    {% endfor %}
+    <button type="submit" class="px-4 py-2 bg-gray-200 rounded">← Previous</button>
+  </form>
+
+  <form method="post">
+    <input type="hidden" name="query_index" value="{{ query_index + 1 if query_index < queries | length - 1 else 0 }}">
+    <input type="hidden" name="view_mode" value="{{ view_mode }}">
+    <input type="hidden" name="show_only_correct" value="{{ 'true' if show_only_correct else '' }}">
+    {% for model in selected_models %}
+      <input type="hidden" name="models" value="{{ model }}">
+    {% endfor %}
+    <button type="submit" class="px-4 py-2 bg-gray-200 rounded">Next →</button>
+  </form>
+</div>
+
+{% endblock %}

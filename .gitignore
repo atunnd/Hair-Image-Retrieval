@@ -15,6 +15,21 @@ __pycache__/
 /.vscode
 /dataset_pipeline
 
+# Model files
+*.pt
+
+# Image files
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.gif
+*.tiff
+*.webp
+
+# JSON files
+*.json
+
 # Distribution / packaging
 .Python
 build/
