@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.models.retrieval_api import router as retrieval_router
 from app.models.data_manager import DataManager
 from app.utils.image_utils import ImagePathResolver, ResultProcessor
-from app.config.datasets import DATASETS, MODELS, list_available_datasets, list_available_models
+from app.config.datasets import DATASETS, MODELS, list_available_datasets, get_dynamic_models
 import logging
 
 # Set up logging
@@ -48,8 +48,7 @@ async def index(
     dataset: str = Form("hairstyle"),
     query_id: str = Form(None),
     query_index: int = Form(0),
-    models: list = Form(["dino", "simmim"]),
-    model_versions: dict = Form({}),
+    models: list = Form(["dino_10k", "simmim_10k"]),
     show_only_correct: bool = Form(False),
     view_mode: str = Form("full")
 ):
@@ -76,25 +75,18 @@ async def index(
     
     # Limit to first two models for display
     display_models = models[:2]
-    available_models = data_manager.get_available_models()
+    available_model_versions = data_manager.get_available_model_versions()
+    dynamic_models = data_manager.get_dynamic_models()
     
-    # Process results for each model
+    # Process results for each model version
     results = {}
-    all_versions = data_manager.get_all_available_versions()
     
-    for model in display_models:
-        if model not in available_models:
+    for model_version_key in display_models:
+        if model_version_key not in available_model_versions:
             continue
-        
-        # Get version to use for this model
-        version = model_versions.get(model)
-        if not version:
-            # Use first available version if none specified
-            available_versions = data_manager.get_available_versions(dataset, model)
-            version = available_versions[0] if available_versions else "10k"
             
-        # Get model results with specific version
-        model_results_raw = data_manager.get_model_results(dataset, model, version)
+        # Get model results for this specific model version
+        model_results_raw = data_manager.get_model_results(dataset, model_version_key)
         query_key = ResultProcessor.get_query_key(dataset, selected_query)
         model_result = model_results_raw.get(query_key, [])
         
@@ -124,11 +116,10 @@ async def index(
             miss_images.append(img_paths)
         
         # Store results
-        results[model] = {
-            "model_name": MODELS[model]["name"],
-            "model_description": MODELS[model]["description"],
-            "version": version,
-            "available_versions": data_manager.get_available_versions(dataset, model),
+        model_config = dynamic_models.get(model_version_key, {})
+        results[model_version_key] = {
+            "model_name": model_config.get("name", model_version_key),
+            "model_description": model_config.get("description", ""),
             "top100": result_images,
             "ground_truth": ImagePathResolver.get_ground_truth_paths(dataset, ground_truth),
             "hits": hit_images,
@@ -141,7 +132,7 @@ async def index(
             }
         }
         
-        logger.debug(f"Model {model} - Hits: {len(hits)}, Misses: {len(misses)}")
+        logger.debug(f"Model {model_version_key} - Hits: {len(hits)}, Misses: {len(misses)}")
     
     # Get query image path
     query_image_path = ImagePathResolver.get_query_image_path(dataset, selected_query, view_mode)
@@ -151,21 +142,19 @@ async def index(
         {
             "request": request,
             "datasets": DATASETS,
-            "models": MODELS,
+            "models": dynamic_models,
             "selected_dataset": dataset,
             "queries": queries,
             "query_index": query_index,
             "selected_query": selected_query,
             "selected_models": models,
-            "model_versions": model_versions,
             "display_models": display_models,
             "show_only_correct": show_only_correct,
             "view_mode": view_mode,
             "query_image_path": query_image_path,
             "results": results,
             "available_datasets": available_datasets,
-            "available_models": available_models,
-            "all_versions": all_versions
+            "available_model_versions": available_model_versions
         }
     )
 
@@ -175,7 +164,7 @@ async def health_check():
     return {
         "status": "healthy",
         "datasets_loaded": len(data_manager.get_available_datasets()),
-        "models_available": len(data_manager.get_available_models())
+        "model_versions_available": len(data_manager.get_available_model_versions())
     }
 
 @app.post("/reload")

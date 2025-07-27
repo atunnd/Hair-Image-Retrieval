@@ -8,7 +8,11 @@ from typing import Dict, List, Any, Union
 from fastapi import HTTPException
 import logging
 
-from app.config.datasets import get_dataset_config, get_result_file_path, list_available_datasets, list_available_models, get_all_available_versions
+from app.config.datasets import (
+    get_dataset_config, get_result_file_path, list_available_datasets, 
+    list_available_models, list_all_model_versions, get_dynamic_models, 
+    parse_model_version_key
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,10 +57,12 @@ def load_benchmark(dataset_key: str) -> Dict[str, List[str]]:
     logger.debug(f"Loaded benchmark for {dataset_key}: {len(result)} queries")
     return result
 
-def load_model_results(dataset_key: str, model_key: str, version: str = "10k") -> Dict[str, List[str]]:
-    """Load model results for a specific dataset, model, and version."""
+def load_model_results(dataset_key: str, model_version_key: str) -> Dict[str, List[str]]:
+    """Load model results for a specific dataset and model version."""
     try:
-        result_file = get_result_file_path(dataset_key, model_key, version)
+        # Parse the model version key to get base model and version
+        base_model, version = parse_model_version_key(model_version_key)
+        result_file = get_result_file_path(dataset_key, base_model, version)
         
         if not result_file.exists():
             logger.error(f"Result file not found: {result_file}")
@@ -80,11 +86,11 @@ def load_model_results(dataset_key: str, model_key: str, version: str = "10k") -
             logger.error(f"Unknown result format in {result_file}")
             return {}
         
-        logger.debug(f"Loaded {model_key}:{version} results for {dataset_key}: {len(results)} queries")
+        logger.debug(f"Loaded {model_version_key} results for {dataset_key}: {len(results)} queries")
         return results
         
     except Exception as e:
-        logger.error(f"Error loading model results for {dataset_key}/{model_key}:{version}: {e}")
+        logger.error(f"Error loading model results for {dataset_key}/{model_version_key}: {e}")
         return {}
 
 def load_all_datasets() -> Dict[str, Dict[str, List[str]]]:
@@ -94,24 +100,20 @@ def load_all_datasets() -> Dict[str, Dict[str, List[str]]]:
         datasets[dataset_key] = load_benchmark(dataset_key)
     return datasets
 
-def load_all_model_results() -> Dict[str, Dict[str, Dict[str, Dict[str, List[str]]]]]:
+def load_all_model_results() -> Dict[str, Dict[str, Dict[str, List[str]]]]:
     """Load all model results for all datasets with all available versions."""
     all_results = {}
-    all_versions = get_all_available_versions()
+    dynamic_models = get_dynamic_models()
     
     for dataset_key in list_available_datasets():
         all_results[dataset_key] = {}
-        for model_key in list_available_models():
-            all_results[dataset_key][model_key] = {}
-            available_versions = all_versions.get(dataset_key, {}).get(model_key, [])
-            
-            for version in available_versions:
-                all_results[dataset_key][model_key][version] = load_model_results(dataset_key, model_key, version)
+        for model_version_key in dynamic_models.keys():
+            all_results[dataset_key][model_version_key] = load_model_results(dataset_key, model_version_key)
     
     return all_results
 
 class DataManager:
-    """Centralized data management class with multi-version support."""
+    """Centralized data management class with model versions as separate entities."""
     
     def __init__(self):
         self.datasets = {}
@@ -132,7 +134,7 @@ class DataManager:
         """Initialize empty data structures."""
         self.datasets = {dataset: {} for dataset in list_available_datasets()}
         self.model_results = {
-            dataset: {model: {} for model in list_available_models()}
+            dataset: {model: {} for model in list_all_model_versions()}
             for dataset in list_available_datasets()
         }
     
@@ -140,41 +142,21 @@ class DataManager:
         """Get benchmark data for a dataset."""
         return self.datasets.get(dataset_key, {})
     
-    def get_model_results(self, dataset_key: str, model_key: str, version: str = None) -> Dict[str, List[str]]:
-        """Get model results for a specific dataset, model, and version."""
-        model_data = self.model_results.get(dataset_key, {}).get(model_key, {})
-        
-        # If version is specified, return that version
-        if version:
-            return model_data.get(version, {})
-        
-        # If no version specified, return the first available version
-        available_versions = list(model_data.keys())
-        if available_versions:
-            return model_data[available_versions[0]]
-        
-        return {}
+    def get_model_results(self, dataset_key: str, model_version_key: str) -> Dict[str, List[str]]:
+        """Get model results for a specific dataset and model version."""
+        return self.model_results.get(dataset_key, {}).get(model_version_key, {})
     
     def get_available_datasets(self) -> List[str]:
         """Get list of available datasets."""
         return list(self.datasets.keys())
     
-    def get_available_models(self) -> List[str]:
-        """Get list of available models."""
-        return list_available_models()
+    def get_available_model_versions(self) -> List[str]:
+        """Get list of available model versions."""
+        return list_all_model_versions()
     
-    def get_available_versions(self, dataset_key: str, model_key: str) -> List[str]:
-        """Get available versions for a specific dataset and model."""
-        return list(self.model_results.get(dataset_key, {}).get(model_key, {}).keys())
-    
-    def get_all_available_versions(self) -> Dict[str, Dict[str, List[str]]]:
-        """Get all available versions for all datasets and models."""
-        result = {}
-        for dataset_key in self.get_available_datasets():
-            result[dataset_key] = {}
-            for model_key in self.get_available_models():
-                result[dataset_key][model_key] = self.get_available_versions(dataset_key, model_key)
-        return result
+    def get_dynamic_models(self) -> Dict[str, Dict[str, str]]:
+        """Get dynamic model configurations."""
+        return get_dynamic_models()
     
     def reload_data(self):
         """Reload all data."""

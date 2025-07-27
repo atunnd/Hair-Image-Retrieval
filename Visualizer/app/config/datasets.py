@@ -40,26 +40,71 @@ DATASETS = {
 }
 
 # Model configurations
+def get_dynamic_models() -> Dict[str, Dict[str, str]]:
+    """Dynamically generate model configurations based on available files."""
+    models = {}
+    all_versions = get_all_available_versions()
+    
+    base_models = {
+        "dino": {
+            "name": "DINO",
+            "description": "Self-supervised Vision Transformer"
+        },
+        "simmim": {
+            "name": "SimMIM", 
+            "description": "Masked Image Modeling"
+        },
+        "mae": {
+            "name": "MAE",
+            "description": "Masked Autoencoder"
+        },
+        "siamim": {
+            "name": "SiamIM",
+            "description": "Siamese Masked Image Modeling"
+        },
+        "simclr": {
+            "name": "SimCLR",
+            "description": "Contrastive Learning"
+        }
+    }
+    
+    # Create model entries for each version found
+    for dataset_key in all_versions:
+        for model_key, versions in all_versions[dataset_key].items():
+            if model_key in base_models:
+                base_config = base_models[model_key]
+                for version in versions:
+                    model_version_key = f"{model_key}_{version}"
+                    models[model_version_key] = {
+                        "name": f"{base_config['name']} ({version})",
+                        "description": base_config["description"],
+                        "base_model": model_key,
+                        "version": version
+                    }
+    
+    return models
+
+# For backward compatibility, we'll also keep a static version
 MODELS = {
     "dino": {
         "name": "DINO",
-        "description": "Vision Transformer with DINO self-supervised learning"
+        "description": "Self-supervised Vision Transformer"
     },
     "simmim": {
         "name": "SimMIM", 
-        "description": "Masked Image Modeling for self-supervised learning"
+        "description": "Masked Image Modeling"
     },
     "mae": {
         "name": "MAE",
-        "description": "Masked Autoencoders for self-supervised learning"
+        "description": "Masked Autoencoder"
     },
     "siamim": {
         "name": "SiamIM",
-        "description": "Siamese Image Modeling"
+        "description": "Siamese Masked Image Modeling"
     },
     "simclr": {
         "name": "SimCLR",
-        "description": "Contrastive Learning of Visual Representations"
+        "description": "Contrastive Learning"
     }
 }
 
@@ -127,5 +172,27 @@ def list_available_datasets() -> list:
     return list(DATASETS.keys())
 
 def list_available_models() -> list:
-    """List all available models."""
+    """List all available base models."""
     return list(MODELS.keys())
+
+def list_all_model_versions() -> List[str]:
+    """List all model versions (base_model_version format)."""
+    return list(get_dynamic_models().keys())
+
+def parse_model_version_key(model_version_key: str) -> tuple[str, str]:
+    """Parse a model version key like 'siamim_60k' into ('siamim', '60k')."""
+    dynamic_models = get_dynamic_models()
+    if model_version_key in dynamic_models:
+        config = dynamic_models[model_version_key]
+        return config['base_model'], config['version']
+    
+    # Fallback for direct base model names
+    if model_version_key in MODELS:
+        return model_version_key, "10k"
+    
+    # Try to parse manually
+    parts = model_version_key.rsplit('_', 1)
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    
+    return model_version_key, "10k"
