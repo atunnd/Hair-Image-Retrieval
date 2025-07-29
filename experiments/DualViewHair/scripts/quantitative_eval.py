@@ -242,14 +242,14 @@ def main():
     
     # === CONFIG ===
     benchmark_path = "/mnt/mmlab2024nas/thanhnd_student/QuocAnh/FCIR/Baselines/Composed-Image-Retrieval/benchmark_processing/hairstyle_retrieval_benchmark.json"
-    index_dir = "./faiss_index_dualviewhair"
+    index_dir = "./faiss_index_dualviewhair_ntloss"
     database_root = "/mnt/mmlab2024nas/thanhnd_student/QuocAnh/FCIR/Baselines/HairLearning/data/train"
     query_root = "/mnt/mmlab2024nas/thanhnd_student/QuocAnh/FCIR/Baselines/HairLearning/data/train/HairImages/"
     
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
-    checkpoint_path = "/mnt/mmlab2024nas/thanhnd_student/QuocAnh/FCIR/Baselines/Composed-Image-Retrieval/experiments/DualViewHair/model_checkpoints/model_epoch_40.pth"
+    checkpoint_path = "/mnt/mmlab2024nas/thanhnd_student/QuocAnh/FCIR/Baselines/Composed-Image-Retrieval/experiments/DualViewHair/model_ntxent_epoch_10.pth"
     print(f"🚀 Using checkpoint: {checkpoint_path}")
 
     # Load benchmark

@@ -162,7 +162,7 @@ def main_with_queue():
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'loss': train_loss,
-            }, f'model_checkpoints/model_with_queue_epoch_{epoch+1}.pth')
+            }, f'/mnt/mmlab2024nas/thanhnd_student/QuocAnh/FCIR/Baselines/Composed-Image-Retrieval/experiments/DualViewHair/model_checkpoints/model_with_queue_epoch_{epoch+1}.pth')
             print(f"  Saved: model_with_queue_epoch_{epoch+1}.pth")
     
     print("Training with momentum queue complete!")

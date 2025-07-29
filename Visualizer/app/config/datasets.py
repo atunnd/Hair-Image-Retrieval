@@ -34,7 +34,7 @@ DATASETS = {
             "main": "/korean_images"
         },
         "image_paths": {
-            "main": "/mnt/mmlab2024nas/thanhnd_student/QuocAnh/FCIR/Baselines/Composed-Image-Retrieval/data/korean_hairstyle_benchmark/images/"
+            "main": "/mnt/mmlab2024nas/thanhnd_student/QuocAnh/FCIR/Baselines/Composed-Image-Retrieval/benchmark_processing/korean_hairstyle_benchmark/images/"
         }
     }
 }
