@@ -80,7 +80,7 @@ def main(args):
 
     model = SupConResNet(name=args.model)
     trainer = Trainer(model, train_loader, test_loader, args)
-    print("Mode: ", args.test)
+    
     if args.test:
         state_dict = torch.load(args.test_model_path, map_location=args.device)
         model.load_state_dict(state_dict)
@@ -89,7 +89,6 @@ def main(args):
         print(f"Test accuracy: {val_acc:.4f}")
     else:
         trainer.train()
-
 
 if __name__ == "__main__":
     args = parse_args()

@@ -32,12 +32,11 @@ class Trainer:
         if self.mode == 'mae':
             self.criterion = nn.MSELoss()
         elif self.mode == 'simclr':
-            self.riterion = NTXentLoss()
+            self.criterion = NTXentLoss()
         elif self.mode == 'simclr_supcon':
             self.criterion = SupConLoss()
         
         self.optimizer = get_optimizer(self.model, self.lr, self.weight_decay, self.beta1, self.beta2)
-
         self.neg_sampling = False
 
         if args.neg_sample:
@@ -55,9 +54,11 @@ class Trainer:
 
             # init triplet loss
             self.triplet_loss = nn.TripletMarginLoss(margin=1.0, p=2, eps=1e-7)
+        else:
+            if not args.test:
+                os.makedirs(os.path.join(self.save_path, self.mode), exist_ok=True)
             
-        if not args.test:
-            os.makedirs(os.path.join(self.save_path, self.mode), exist_ok=True)
+        
     
     def train_one_epoch_simclr(self, epoch=0):
         self.model.train()
@@ -96,7 +97,7 @@ class Trainer:
             images = [img.to(self.device) for img in images]
             images = torch.cat([images[0], images[1]], dim=0)
             bsz = labels.shape[0]
-
+            
             features = self.model(images)
             f1, f2 = torch.split(features, [bsz, bsz], dim=0)
             features = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
@@ -133,7 +134,7 @@ class Trainer:
                 z1 = self.model(z1)
                 nt_xent_loss = self.criterion(z0, z1)
             
-            total_loss = alpha*trip_loss + (1-alpha)*nt_xent_loss
+            total_loss = (1-alpha)*trip_loss + alpha*nt_xent_loss
             running_loss += total_loss.detach()
 
             total_loss.backward()
@@ -148,7 +149,7 @@ class Trainer:
             for inputs, targets in tqdm(self.val_loader, desc="Validating"):
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
                 outputs = self.model(inputs)
-                _, predictions = torch.max(outputs, dim=1) # return class indexes
+                _, predictions = torch.max(outputs, dim=1) 
                 correct += (predictions == targets).sum().item()
                 total += targets.size(0)
             
@@ -170,10 +171,13 @@ class Trainer:
             print(f"Epoch {epoch}/{self.epochs}")
             train_loss = train_one_epoch(epoch=epoch, alpha=alpha)
             print(f"Train loss: {train_loss:.4f}")
-            if epoch % 20 == 0:
+            if epoch + 1 % 20 == 0:
                 val_acc = self.validate()
                 print(f"Val acc: {val_acc:.4f}")
-                output = os.path.join(os.path.join(self.save_path, f"{self.mode}_neg_sample"), f"model_ckpt_{epoch}.pth")
+                if self.neg_sampling:
+                    output = os.path.join(os.path.join(self.save_path, f"{self.mode}_neg_sample"), f"model_ckpt_{epoch}.pth")
+                else:
+                    output = os.path.join(os.path.join(self.save_path, f"{self.mode}"), f"model_ckpt_{epoch}.pth")
                 torch.save(self.model.state_dict(), output)
                 print(f"✅ Model saved to {self.save_path}")
             

@@ -2,7 +2,7 @@
 
 python mainpretrain.py \
   --epochs 100 \
-  --batch_size 40 \
+  --batch_size 32 \
   --device cuda \
   --save_path output_dir \
   --size 224 \
@@ -17,5 +17,6 @@ python mainpretrain.py \
   --mode simclr_supcon \
   --model resnet18 \
   --seed 42 \
-  --num_workers 4 \
- 
+  --num_workers 8 \
+  --test True \
+  --test_model_path output_dir/simclr_supcon/model_ckpt_20.pth

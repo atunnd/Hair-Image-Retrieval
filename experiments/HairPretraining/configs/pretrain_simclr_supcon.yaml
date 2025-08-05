@@ -14,4 +14,4 @@ temp: 0.7
 mode: simclr_supcon
 model: resnet18
 seed: 42
-num_workers: 16
+num_workers: 4
