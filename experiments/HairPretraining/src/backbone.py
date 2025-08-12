@@ -16,6 +16,7 @@ import copy
 from lightly.models import utils
 from lightly.models.modules import MAEDecoderTIMM, MaskedVisionTransformerTIMM
 from lightly.transforms import MAETransform
+from lightly.models.utils import deactivate_requires_grad, update_momentum
 
 class MAE(nn.Module):
     def __init__(self, vit):
@@ -81,11 +82,19 @@ class SimCLR(nn.Module):
     def __init__(self, backbone):
         super().__init__()
         self.backbone = backbone
-        self.projection_head = SimCLRProjectionHead(512, 512, 128)
+        self.projection_head = SimCLRProjectionHead(512, 512, 512)
+
+        self.backbone_momentum = copy.deepcopy(self.backbone)
+        self.projection_head_momentum = copy.deepcopy(self.projection_head)
 
     def forward(self, x):
         x = self.backbone(x).flatten(start_dim=1)
         z = self.projection_head(x)
+        return z
+
+    def forward_momentum(self, x):
+        x = self.backbone_momentum(x).flatten(start_dim=1)
+        z = self.projection_head_momentum(x).detach()
         return z
     
 
