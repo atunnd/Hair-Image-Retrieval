@@ -14,8 +14,9 @@ python mainpretrain.py \
   --beta1 0.9 \
   --beta2 0.999 \
   --temp 0.7 \
-  --mode simclr_supcon \
+  --mode simclr \
   --model resnet18 \
   --seed 42 \
-  --num_workers 16 \
-  --classes 49
+  --num_workers 8 \
+
+    

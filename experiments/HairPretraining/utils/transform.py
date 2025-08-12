@@ -4,12 +4,15 @@ from torch.utils.data import Dataset
 import pandas as pd
 import os
 from torchvision.io import read_image
+import torch
+import torchvision.transforms as T
 
-positive_transform = transforms.Compose([
-    transforms.RandomResizedCrop(size=224, scale=(0.9, 1.0)),  # zoom nhẹ (90% - 100%)
-    transforms.RandomRotation(degrees=10),                     # xoay nhẹ ±10 độ
-    transforms.ToTensor()
+
+positive_transform = T.Compose([
+    T.RandomResizedCrop(224, scale=(0.9, 1.0)),  # Zoom nhẹ
+    T.RandomHorizontalFlip(p=0.5),               # Lật ngang nhẹ
 ])
+
 
 def get_train_transform(size, mean, std):
     """

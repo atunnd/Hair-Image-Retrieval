@@ -1,5 +1,10 @@
 import torch
 import random
+import numpy as np
+from collections import defaultdict, Counter
+
+
+
 
 class KMeans:
     def __init__(self, k=10, momentum=0.9):
@@ -13,6 +18,7 @@ class KMeans:
         """
         indices = torch.randperm(len(batch))[:self.k]
         self.centroids = batch[indices]
+        return self.centroids
 
     def convergence_checked(self, old, new, tol=1e-4):
         """
@@ -20,12 +26,12 @@ class KMeans:
         """
         return torch.all(torch.norm(old - new, dim=1) < tol)
 
-    def assign_label(self, batch):
+    def assign_label(self, batch, centroids):
         """
         Assign each sample to the closest centroid (based on cosine similarity).
         """
         batch_norm = torch.nn.functional.normalize(batch, dim=1)
-        centroids_norm = torch.nn.functional.normalize(self.centroids, dim=1)
+        centroids_norm = torch.nn.functional.normalize(centroids, dim=1)
         similarity = torch.matmul(batch_norm, centroids_norm.T)  # (N, k)
         labels = torch.argmax(similarity, dim=1)
         return labels
@@ -40,17 +46,17 @@ class KMeans:
         device = batch.device
 
         if init:
-            self.init_centroids(batch)
-        if prev_centroids:
+            self.centroids = self.init_centroids(batch) # centroids 20
+        if prev_centroids is not None:
             self.centroids = prev_centroids.to(device)
 
         for _ in range(10):  # max 10 iterations
-            labels = self.assign_label(batch)
+            labels = self.assign_label(batch, self.centroids)
             new_centroids = torch.zeros_like(self.centroids)
             for i in range(self.k):
                 mask = labels == i
                 if mask.sum() == 0:
-                    new_centroids[i] = self.centroids[i]  # giữ nguyên nếu cụm rỗng
+                    new_centroids[i] = self.centroids[i]  
                 else:
                     new_centroids[i] = batch[mask].mean(dim=0)
 
@@ -75,7 +81,7 @@ class NegSamplerMiniBatch(torch.nn.Module):
         self.momentum = momentum
         self.kmeans = KMeans(k=k, momentum=momentum)
 
-    def neg_picker(self, centroids, batch):
+    def neg_picker(self, centroids, batch, real_batch):
         """
         For each anchor in `batch`, find its 2nd most similar centroid (hard negative centroid),
         then find the sample in batch closest to this hard negative centroid.
@@ -104,11 +110,13 @@ class NegSamplerMiniBatch(torch.nn.Module):
 
         # Get the index of the sample in batch closest to the centroid (but not itself)
         neg_sample_indices = torch.argmax(sim2, dim=1)  # [B]
-        negative_samples = batch[neg_sample_indices]  # [B, D]
+        #negative_samples = batch[neg_sample_indices]  # [B, D]
+
+        negative_samples = real_batch[neg_sample_indices]
         
         return negative_samples
 
-    def forward(self, embeddings, first_batch=False, prev_centroids=None):
+    def forward(self, embeddings, real_batch, first_batch=False, prev_centroids=None):
         """
         batch: batch embeddings
         Return: centroids and negative batch (hard negative samples)
@@ -119,5 +127,6 @@ class NegSamplerMiniBatch(torch.nn.Module):
         else:
             centroids = self.kmeans.fit(embeddings, prev_centroids=prev_centroids)
 
-        negatives = self.neg_picker(centroids, embeddings)
+        negatives = self.neg_picker(centroids, embeddings, real_batch)
+
         return centroids, negatives

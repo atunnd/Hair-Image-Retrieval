@@ -1,7 +1,7 @@
 #!/bin/bash
 
 python mainpretrain.py \
-  --epochs 200 \
+  --epochs 100 \
   --batch_size 40 \
   --device cuda:1 \
   --save_path output_dir \
@@ -17,5 +17,10 @@ python mainpretrain.py \
   --mode simclr_supcon \
   --model resnet18 \
   --seed 42 \
-  --num_workers 16 \
-  --classes 49
+  --num_workers 12 \
+  --neg_sample True \
+  --warm_up_epochs 20 \
+  --neg_minibatch True \
+  --classes 128 \
+  --neg_loss simclr 
+    

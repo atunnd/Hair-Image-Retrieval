@@ -7,7 +7,13 @@ from utils.transform import get_test_transform, get_train_transform, TwoCropTran
 from utils.dataloader import CustomDataset
 import torch
 from torch.utils.data import DataLoader
-from src.backbone import SupConResNet
+from src.backbone import SupConResNet, SimCLR, MAE
+import torch
+import torchvision
+from torch import nn
+from timm.models.vision_transformer import vit_base_patch32_224
+from lightly.transforms.simclr_transform import SimCLRTransform
+from lightly.transforms import MAETransform
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Self-supervised/Supervised Trainer Arguments")
@@ -50,6 +56,11 @@ def parse_args():
     parser.add_argument('--dino_checkpoint', type=str, help="Path to pretrained dino checkpoint")
     parser.add_argument('--centroid_momentum', type=float, default=0.9)
     parser.add_argument('--neg_minibatch', type=bool, default=False)
+    parser.add_argument('--neg_loss', type=str, default="simclr", choices=['simclr', 'supcon'], help="loss for negative sampling")
+
+    # supcon setting
+    parser.add_argument('--classes', default=128, type=int, help="Classes for sup con")
+    
 
     return parser.parse_args()
 
@@ -65,11 +76,17 @@ def merge_config_with_args(args):
 
 def main(args):
     
-    # construct data loader
-    mean = (0.5071, 0.4867, 0.4408) # cifar100
-    std = (0.2675, 0.2565, 0.2761)
-    train_transform = get_train_transform(args.size, mean, std)
-    test_transform = get_test_transform(args.size, mean, std)
+    if args.mode == "simclr_supcon":
+        mean = (0.5071, 0.4867, 0.4408) # cifar100
+        std = (0.2675, 0.2565, 0.2761)
+        train_transform = get_train_transform(args.size, mean, std)
+        test_transform = get_test_transform(args.size, mean, std)
+    elif args.mode == "simclr":
+        train_transform = SimCLRTransform(input_size=224)
+        test_transform = SimCLRTransform(input_size=224)
+    elif args.mode == "mae":
+        train_transform = MAETransform(input_size=224)
+        test_transform = MAETransform(input_size=224)
 
     train_dataset = CustomDataset(args.train_annotation, args.img_dir, TwoCropTransform(train_transform))
     test_dataset = CustomDataset(args.test_annotation, args.img_dir, test_transform)
@@ -78,8 +95,16 @@ def main(args):
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, 
                              shuffle=True, num_workers = args.num_workers)
     
+    if args.mode == "simclr_supcon":
+        model = SupConResNet(name=args.model, feat_dim=args.classes)
+    elif args.mode == "simclr":
+        resnet = torchvision.models.resnet18()
+        backbone = nn.Sequential(*list(resnet.children())[:-1])
+        model = SimCLR(backbone)
+    elif args.mode == "mae":
+        vit = vit_base_patch32_224()
+        model = MAE(vit)
 
-    model = SupConResNet(name=args.model)
     trainer = Trainer(model, train_loader, test_loader, args)
     
     if args.test:
