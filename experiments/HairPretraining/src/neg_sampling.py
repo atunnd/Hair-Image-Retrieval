@@ -3,133 +3,24 @@ import random
 import numpy as np
 from collections import defaultdict, Counter
 import faiss
-
-
-"""
-class KMeans:
-    def __init__(self, k=10, momentum=0.9):
-        self.k = k
-        self.momentum = momentum
-        self.centroids = None
-
-    def init_centroids(self, batch):
-        indices = torch.randperm(len(batch))[:self.k]
-        self.centroids = batch[indices]
-        return self.centroids
-
-    def convergence_checked(self, old, new, tol=1e-4):
-        return torch.all(torch.norm(old - new, dim=1) < tol)
-
-    def assign_label(self, batch, centroids):
-        batch_norm = torch.nn.functional.normalize(batch, dim=1)
-        centroids_norm = torch.nn.functional.normalize(centroids, dim=1)
-        similarity = torch.matmul(batch_norm, centroids_norm.T)  # (N, k)
-        labels = torch.argmax(similarity, dim=1)
-        return labels
-
-    def update_centroids(self, old_centroids, new_avg_centroids):
-        return (1 - self.momentum) * old_centroids + self.momentum * new_avg_centroids
-
-    def fit(self, batch, init=False, prev_centroids=None):
-        device = batch.device
-
-        if init:
-            self.centroids = self.init_centroids(batch) # centroids 20
-        if prev_centroids is not None:
-            self.centroids = prev_centroids.to(device)
-
-        for _ in range(10):  # max 10 iterations
-            labels = self.assign_label(batch, self.centroids)
-            new_centroids = torch.zeros_like(self.centroids)
-            for i in range(self.k):
-                mask = labels == i
-                if mask.sum() == 0:
-                    new_centroids[i] = self.centroids[i]  
-                else:
-                    new_centroids[i] = batch[mask].mean(dim=0)
-
-            updated_centroids = self.update_centroids(self.centroids, new_centroids)
-            if self.convergence_checked(self.centroids, updated_centroids):
-                break
-            self.centroids = updated_centroids
-
-        return self.centroids
-
-    @staticmethod
-    def cosine_similarity(x, y):
-        x = torch.nn.functional.normalize(x, dim=-1)
-        y = torch.nn.functional.normalize(y, dim=-1)
-        return torch.sum(x * y, dim=-1)
-
-
-class NegSamplerMiniBatch(torch.nn.Module):
-    def __init__(self, k=5, momentum=0.9):
-        super(NegSamplerMiniBatch, self).__init__()
-        self.k = k
-        self.momentum = momentum
-        self.kmeans = KMeans(k=k, momentum=momentum)
-
-    def neg_picker(self, centroids, batch, real_batch):
-        # Normalize for cosine similarity
-        batch_norm = torch.nn.functional.normalize(batch, dim=1)
-        centroids_norm = torch.nn.functional.normalize(centroids, dim=1)
-
-        # Similarity between each batch sample and centroid
-        sim = torch.matmul(batch_norm, centroids_norm.T)  # [B, C]
-        
-        # Get the 2nd most similar centroid index for each sample
-        top2 = torch.topk(sim, k=2, dim=1).indices
-        neg_indices = top2[:, 1]  # [B]
-        
-        # Get the corresponding centroid vectors
-        negative_centroids = centroids[neg_indices]  # [B, D]
-        negative_centroids_norm = torch.nn.functional.normalize(negative_centroids, dim=1)
-        
-        # Now, for each centroid, find the sample in batch that is closest (cosine sim)
-        sim2 = torch.matmul(negative_centroids_norm, batch_norm.T)  # [B, B]
-        
-        # To avoid selecting itself as negative (optional but recommended)
-        mask = torch.eye(sim2.size(0), device=sim2.device).bool()
-        sim2.masked_fill_(mask, float('-inf'))
-
-        # Get the index of the sample in batch closest to the centroid (but not itself)
-        neg_sample_indices = torch.argmax(sim2, dim=1)  # [B]
-        #negative_samples = batch[neg_sample_indices]  # [B, D]
-
-        negative_samples = real_batch[neg_sample_indices]
-        
-        return negative_samples
-
-    def forward(self, embeddings, real_batch, first_batch=False, prev_centroids=None):
-        if first_batch:
-            centroids = self.kmeans.fit(embeddings, init=True)
-        else:
-            centroids = self.kmeans.fit(embeddings, prev_centroids=prev_centroids)
-
-        negatives = self.neg_picker(centroids, embeddings, real_batch)
-
-        return centroids, negatives
-"""
-
-import torch
-import faiss
 import os
 
 
 class Kmean_Faiss:
-    def __init__(self, dim=128, k=15, device=0, momentum=0.9, save_path=""):
+    def __init__(self, dim=128, k=15, device=0, device_id=0, momentum=0.9, save_path=""):
         self.dim = dim
         self.k = k
         self.device = device
+        self.device_id = device_id
         self.momentum = momentum  
         self.res = faiss.StandardGpuResources()
 
         self.kmeans = faiss.Clustering(dim, k)
         self.kmeans.niter = 25
-        self.kmeans.verbose = True
+        self.kmeans.verbose = False
 
         self.index_flat = faiss.IndexFlatL2(dim)
-        self.index_flat = faiss.index_cpu_to_gpu(self.res, device, self.index_flat)
+        #self.index_flat = faiss.index_cpu_to_gpu(self.res, device_id, self.index_flat)
 
         self.save_path = os.path.join(save_path, "centroids")
         os.makedirs(self.save_path, exist_ok=True)
@@ -174,16 +65,16 @@ class Kmean_Faiss:
 
         # Find the farthest sample from the 2nd centroid
         distances = torch.cdist(negative_centroid, embeddings_filtered)  # shape: (1, N-1)
-        negative_idx = torch.argmax(distances, dim=1)
-
+        #print("Distances: ", distances.shape)
+        negative_idx = torch.argmax(distances, dim=2)
         return embeddings_filtered[negative_idx]
 
 class NegSamplerMiniBatch(torch.nn.Module):
-    def __init__(self, k=5, dim=128, device="cuda", negative_centroid=True):
+    def __init__(self, k=5, dim=128, momentum=0.9, device="cuda", device_id=0, negative_centroid=True, save_path=""):
         super(NegSamplerMiniBatch, self).__init__()
         self.k = k
         self.dim = dim
-        self.kmeans = Kmean_Faiss(dim, k, device)
+        self.kmeans = Kmean_Faiss(dim, k, device, device_id, momentum, save_path)
         self.negative_centroid = negative_centroid
         self.query = self.kmeans.query_hard_negative_centroid if self.negative_centroid else self.kmeans.query_hard_negative_sample
 

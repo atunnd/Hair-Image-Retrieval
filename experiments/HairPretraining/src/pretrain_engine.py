@@ -8,13 +8,14 @@ import os
 import lightly
 from lightly.loss import NTXentLoss
 from utils.losses import SupConLoss
-from utils.utils import get_optimizer, linear_decay_alpha
+from utils.utils import get_optimizer, linear_increase_alpha
 from utils.transform import positive_transform 
 
 from .backbone import DINO
-from .neg_sampling import NegSamplerMiniBatch, NegSamplerClasses, NegSamplerRandomly
+from .neg_sampling import NegSamplerClasses, NegSamplerRandomly, NegSamplerMiniBatch
 import timm
-
+from lightly.utils.scheduler import cosine_schedule
+from lightly.models.utils import deactivate_requires_grad, update_momentum
 
 class Trainer:
     def __init__(self, model, train_loader, val_loader, args):
@@ -29,6 +30,7 @@ class Trainer:
         self.weight_decay = args.weight_decay
         self.beta1 = args.beta1
         self.beta2 = args.beta2
+        self.device_id = args.device_id
 
         if self.mode == 'mae':
             self.criterion = nn.MSELoss()
@@ -46,20 +48,26 @@ class Trainer:
             # neg samling
             self.neg_sampling = True
             self.negative_centroid = args.negative_centroid
-            self.neg_minibatch = args.neg_minibatch
             self.warm_up_epochs = args.warm_up_epochs
             self.centroid_momentum = args.centroid_momentum
             self.sampling_frequency = args.sampling_frequency
 
+            print("Training with centroid: ", self.negative_centroid)
+
             if self.negative_centroid:
                 self.save_path = os.path.join(self.save_path, f"{self.mode}_neg_sample_centroid")
+                print("Training with neg sample centroid")
             else:
                 self.save_path = os.path.join(self.save_path, f"{self.mode}_neg_sample")
+                print("Training with neg sample")
+            os.makedirs(self.save_path, exist_ok=True)
+            print("Create save directory: ", self.save_path)
 
             # set sampling method and loss
             if self.neg_loss == "simclr":
-                self.neg_sampler = NegSamplerMiniBatch(k=10, dim=128, momentum=self.centroid_momentum, negative_centroid=self.negative_centroid, save_path=self.save_path)
+                self.neg_sampler = NegSamplerMiniBatch(k=5, dim=128, momentum=self.centroid_momentum, device=self.device, device_id=self.device_id, negative_centroid=self.negative_centroid, save_path=self.save_path)
                 self.criterion = NTXentLoss()
+                print("create kmeans with faiss")
             elif self.neg_loss == "supcon":
                 self.neg_sampler = NegSamplerClasses()
                 self.criterion = SupConLoss()
@@ -68,7 +76,7 @@ class Trainer:
             self.triplet_loss = nn.TripletMarginLoss(margin=1.0, p=2, eps=1e-7)
         else:
             self.save_path = os.path.join(self.save_path, self.mode)
-        os.makedirs(self.save_path, exist_ok=True)
+            os.makedirs(self.save_path, exist_ok=True)
     
     def train_one_epoch_simclr(self, epoch=0, alpha=0):
         self.model.train()
@@ -129,39 +137,39 @@ class Trainer:
             images = [img.to(self.device) for img in images]
 
     
-    def train_one_epoch_simclr_neg_sample(self, epoch=0, alpha=0, embeddings=0, init_centroid=False, global_centroids=0, ema_loss1 = 0.0, ema_loss2=0.0, beta_loss=0.99, neg_batch=None):
+    def train_one_epoch_simclr_neg_sample(self, epoch=0, alpha=0, neg_batch=None, momentum_val=0):
         self.model.train()
         running_loss = 0.0
         running_loss1 = 0.0
         running_loss2 = 0.0
         for batch_id, batch in enumerate(tqdm(self.train_loader, desc="Training with negative samples")):
-            images, labels = batch[0], batch[1].to(self.device)
+            images, _ = batch[0], batch[1].to(self.device)
+            update_momentum(self.model.backbone, self.model.backbone_momentum, m=momentum_val)
+            update_momentum(
+                self.model.projection_head, self.model.projection_head_momentum, m=momentum_val
+            )
             images = [img.to(self.device) for img in images]
             trip_loss = 0.0
 
             ### STAGE 1: Randomly negative sampling
-            neg_batch[batch_id] = positive_transform(NegSamplerRandomly(images[0]))
-
-            if self.warm_up_epochs == epoch + 1:
-                if batch_id == 0:
-                    print("create embeddings")
-                pos_batch = positive_transform(images[1])
-                with torch.no_grad():
-                    embeddings[batch_id] = self.dino(pos_batch)
+            if self.warm_up_epochs > epoch + 1:
+                negative_samples = positive_transform(NegSamplerRandomly(images[0]))
+                neg_batch[batch_id] = self.model.forward_momentum(negative_samples)
 
             ### STAGE 2: Hard negative mining
-            if self.warm_up_epochs <= epoch:
-                # generate positive sample
+            else:
                 if (epoch + 1) % self.sampling_frequency == 0:
-                    neg_batch[batch_id] = self.neg_sampler(images[0])
                     if batch_id == 0:
                         print("Init centroids")
-                    neg_batch[batch_id] = self.neg_sampler.forward(ema_embeddings, images[0], first_batch=True)
+                    ema_embeddings = self.model.forward_momentum(images[0])
+                    neg_batch[batch_id] = self.neg_sampler.forward(ema_embeddings, batch_id)
 
-            pos_batch = positive_transform(images[1])
-            trip_loss = self.triplet_loss(images[0], pos_batch, neg_batch[batch_id])
+            pos_samples = positive_transform(images[1])
+            pos_batch = self.model.forward_momentum(pos_samples)
+            anchor_batch = self.model.forward_momentum(images[0])
+            #print(anchor_batch.shape, pos_batch.shape, neg_batch[batch_id].shape)
+            trip_loss = self.triplet_loss(anchor_batch, pos_batch, neg_batch[batch_id])
             running_loss1 += trip_loss.item()
-                
             
             # Main encoder running
             x0, x1 = images
@@ -179,7 +187,7 @@ class Trainer:
             self.optimizer.step()
             self.optimizer.zero_grad()
 
-        return running_loss/len(self.train_loader),running_loss1/len(self.train_loader), running_loss2/len(self.train_loader), global_centroids, embeddings, ema_loss1, ema_loss2, neg_batch
+        return running_loss/len(self.train_loader),running_loss1/len(self.train_loader), running_loss2/len(self.train_loader), neg_batch
 
     
     def train(self):
@@ -194,24 +202,20 @@ class Trainer:
         
         if self.neg_sampling:
             train_one_epoch = self.train_one_epoch_simclr_neg_sample
-            global_centroids = [torch.Tensor([]) for _ in range(len(self.train_loader))]
-            init_centroid = True
-            embeddings = [torch.Tensor([]) for _ in range(len(self.train_loader))]
             neg_batch= [torch.Tensor([]) for _ in range(len(self.train_loader))]
-            ema_loss1 = 0.0
-            ema_loss2 = 0.0
-            beta_loss = 0.99
+            
 
         for epoch in range(self.epochs):
             alpha = 1
-            if self.warm_up_epochs <= epoch:
-                alpha = linear_decay_alpha(epoch-self.warm_up_epochs, self.epochs-self.warm_up_epochs)
+            if self.neg_sampling:
+                if self.warm_up_epochs <= epoch + 1:
+                    alpha = linear_increase_alpha(start_alpha=.001, current_epoch=(epoch+1)-self.warm_up_epochs, max_epochs=self.epochs-self.warm_up_epochs)
+                else:
+                    alpha = 0.001
             print(f"Epoch {epoch}/{self.epochs}")
             if self.neg_sampling:
-                if self.warm_up_epochs == epoch:
-                    train_loss, train_trip_loss, train_ntxent_loss, global_centroids, embeddings, ema_loss1, ema_loss2, neg_batch = train_one_epoch(epoch=epoch, alpha=alpha, embeddings=embeddings, init_centroid=True, global_centroids=global_centroids, ema_loss1=ema_loss1, ema_loss2=ema_loss2, beta_loss=beta_loss, neg_batch=neg_batch)
-                else:
-                    train_loss, train_trip_loss, train_ntxent_loss, _, _, ema_loss1, ema_loss2, _ = train_one_epoch(epoch=epoch, alpha=alpha, embeddings=embeddings, init_centroid=False, global_centroids=global_centroids, ema_loss1=ema_loss1, ema_loss2=ema_loss2, beta_loss=beta_loss, neg_batch=neg_batch)
+                momentum_val = cosine_schedule(epoch, self.epochs, 0.996, 1)
+                train_loss, train_trip_loss, train_ntxent_loss, neg_batch = train_one_epoch(epoch=epoch, alpha=alpha, neg_batch=neg_batch, momentum_val=momentum_val)
                 print(f"Total train loss: {train_loss:.4f}, Triplet loss: {train_trip_loss}, NT-Xent loss: {train_ntxent_loss},  Alpha: {alpha}")
             else:
                 train_loss = train_one_epoch(epoch=epoch, alpha=alpha)

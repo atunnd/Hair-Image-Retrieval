@@ -1,9 +1,10 @@
 #!/bin/bash
 
 python mainpretrain.py \
-  --epochs 100 \
-  --batch_size 40 \
-  --device cuda:1 \
+  --epochs 200 \
+  --batch_size 256 \
+  --device cuda:2 \
+  --device_id 2 \
   --save_path output_dir \
   --size 224 \
   --train_annotation data/data_train.csv\
@@ -14,13 +15,14 @@ python mainpretrain.py \
   --beta1 0.9 \
   --beta2 0.999 \
   --temp 0.7 \
-  --mode simclr_supcon \
+  --mode simclr \
   --model resnet18 \
   --seed 42 \
-  --num_workers 12 \
+  --num_workers 16 \
   --neg_sample True \
   --warm_up_epochs 20 \
-  --neg_minibatch True \
-  --classes 128 \
-  --neg_loss simclr 
+  --neg_loss simclr \
+  --sampling_frequency 20 \
+  
+
     

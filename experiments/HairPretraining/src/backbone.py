@@ -82,10 +82,13 @@ class SimCLR(nn.Module):
     def __init__(self, backbone):
         super().__init__()
         self.backbone = backbone
-        self.projection_head = SimCLRProjectionHead(512, 512, 512)
+        self.projection_head = SimCLRProjectionHead(512, 512, 128)
 
         self.backbone_momentum = copy.deepcopy(self.backbone)
         self.projection_head_momentum = copy.deepcopy(self.projection_head)
+
+        deactivate_requires_grad(self.backbone_momentum)
+        deactivate_requires_grad(self.projection_head_momentum)
 
     def forward(self, x):
         x = self.backbone(x).flatten(start_dim=1)

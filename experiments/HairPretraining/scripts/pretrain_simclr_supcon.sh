@@ -2,8 +2,8 @@
 
 python mainpretrain.py \
   --epochs 200 \
-  --batch_size 40 \
-  --device cuda:1 \
+  --batch_size 128 \
+  --device cuda:3 \
   --save_path output_dir \
   --size 224 \
   --train_annotation data/data_train.csv\

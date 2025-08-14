@@ -2,8 +2,9 @@
 
 python mainpretrain.py \
   --epochs 200 \
-  --batch_size 40 \
-  --device cuda:1 \
+  --batch_size 256 \
+  --device cuda:3 \
+  --device_id 7 \
   --save_path output_dir \
   --size 224 \
   --train_annotation data/data_train.csv\
@@ -17,6 +18,7 @@ python mainpretrain.py \
   --mode simclr \
   --model resnet18 \
   --seed 42 \
-  --num_workers 8 \
+  --num_workers 16 \
+
 
     

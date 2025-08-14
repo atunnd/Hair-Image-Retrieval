@@ -10,7 +10,7 @@ from torchvision.transforms.functional import to_pil_image
 
 class CustomDataset(Dataset):
     def __init__(self, annotations_file, img_dir, transform=None, transform_target=None):
-        self.img_labels = pd.read_csv(annotations_file)[:5000]
+        self.img_labels = pd.read_csv(annotations_file)
         self.img_dir = img_dir
         self.transform = transform
         self.transform_target = transform_target

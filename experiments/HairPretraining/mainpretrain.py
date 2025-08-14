@@ -22,6 +22,7 @@ def parse_args():
     parser.add_argument('--epochs', type=int, default=20, help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
     parser.add_argument('--device', type=str, default='cuda', help='Device to use: cuda or cpu')
+    parser.add_argument('--device_id', type=int, default=0)
     parser.add_argument('--save_path', type=str, default='output_dir', help='Path to save model checkpoint')
     parser.add_argument('--size', type=int, default=224, help="Image size for training")
     parser.add_argument('--train_annotation', type=str, help='Path to training annotation file')
@@ -53,10 +54,10 @@ def parse_args():
     # negative sampling
     parser.add_argument('--neg_sample', default=False, type=bool, help='Use negative sampling')
     parser.add_argument('--warm_up_epochs', default=0, type=int, help='Number of warmup epochs for negative sampling')
-    parser.add_argument('--dino_checkpoint', type=str, help="Path to pretrained dino checkpoint")
     parser.add_argument('--centroid_momentum', type=float, default=0.9)
-    parser.add_argument('--neg_minibatch', type=bool, default=False)
+    parser.add_argument('--negative_centroid', type=bool, default=False)
     parser.add_argument('--neg_loss', type=str, default="simclr", choices=['simclr', 'supcon'], help="loss for negative sampling")
+    parser.add_argument('--sampling_frequency', type=int, default=0, help="Frequency to sample hard negative")
 
     # supcon setting
     parser.add_argument('--classes', default=128, type=int, help="Classes for sup con")
@@ -84,6 +85,10 @@ def main(args):
     elif args.mode == "simclr":
         train_transform = SimCLRTransform(input_size=224)
         test_transform = SimCLRTransform(input_size=224)
+        #mean = (0.5071, 0.4867, 0.4408) # cifar100
+        #std = (0.2675, 0.2565, 0.2761)
+        #train_transform = get_train_transform(args.size, mean, std)
+        #test_transform = get_test_transform(args.size, mean, std)
     elif args.mode == "mae":
         train_transform = MAETransform(input_size=224)
         test_transform = MAETransform(input_size=224)

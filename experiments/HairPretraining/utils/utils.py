@@ -16,8 +16,11 @@ def get_optimizer(model, lr, weight_decay, beta1, beta2):
     ]
     return torch.optim.Adam(param_groups, lr, betas=(beta1, beta2))
 
-def linear_decay_alpha(epoch, max_epochs):
-    return max(0.0, 1.0 - epoch / max_epochs)
+def linear_increase_alpha(start_alpha, current_epoch, max_epochs, alpha_max=0.9):
+    alpha = start_alpha + (alpha_max - start_alpha) * (current_epoch / max_epochs)
+    return min(alpha_max, alpha)
+
+
 
 def set_seed(seed=42):
     random.seed(seed)
