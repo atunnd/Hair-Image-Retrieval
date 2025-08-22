@@ -3,8 +3,8 @@
 python mainpretrain.py \
   --epochs 200 \
   --batch_size 256 \
-  --device cuda:2 \
-  --device_id 2 \
+  --device cuda:6 \
+  --device_id 6 \
   --save_path output_dir \
   --size 224 \
   --train_annotation data/data_train.csv\
@@ -15,10 +15,15 @@ python mainpretrain.py \
   --beta1 0.9 \
   --beta2 0.999 \
   --temp 0.7 \
-  --mode simclr \
-  --model resnet50 \
+  --mode mae \
+  --model vit \
   --seed 42 \
   --num_workers 16 \
+  --neg_sample True \
+  --warm_up_epochs 1 \
+  --neg_loss mae \
+  --sampling_frequency 20 \
+  --supervised_negative True
 
 
     

@@ -3,8 +3,8 @@
 python mainpretrain.py \
   --epochs 200 \
   --batch_size 256 \
-  --device cuda:2 \
-  --device_id 2 \
+  --device cuda:7 \
+  --device_id 7 \
   --save_path output_dir \
   --size 224 \
   --train_annotation data/data_train.csv\
@@ -20,9 +20,9 @@ python mainpretrain.py \
   --seed 42 \
   --num_workers 16 \
   --neg_sample True \
-  --warm_up_epochs 20 \
+  --warm_up_epochs 1 \
   --neg_loss simclr \
-  --sampling_frequency 20 \
-  
+  --sampling_frequency 1 \
+
 
     

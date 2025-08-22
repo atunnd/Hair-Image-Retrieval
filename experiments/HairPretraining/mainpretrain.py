@@ -14,6 +14,8 @@ from torch import nn
 from timm.models.vision_transformer import vit_base_patch32_224
 from lightly.transforms.simclr_transform import SimCLRTransform
 from lightly.transforms import MAETransform
+from torch.utils.tensorboard import SummaryWriter
+from torch.utils.tensorboard import SummaryWriter
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Self-supervised/Supervised Trainer Arguments")
@@ -40,25 +42,18 @@ def parse_args():
 
     # Model option
     parser.add_argument('--mode', type=str, default='simclr_supcon', choices=['mae', 'simclr', 'simclr_supcon'])
-    parser.add_argument('--model', type=str, default='resnet18')
+    parser.add_argument('--model', type=str, default='resnet18', choices = ['resnet18', 'resnet50'])
 
     # Optional config
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--config', type=str, help='Optional path to YAML config file (overrides args)')
     parser.add_argument('--num_workers', type=int, default=4)
 
-    # testing
-    parser.add_argument('--test', default=False, type=bool, help='Run in test mode')
-    parser.add_argument('--test_model_path', type=str, default=None, help='Path to the model checkpoint for testing')
-
     # negative sampling
     parser.add_argument('--neg_sample', default=False, type=bool, help='Use negative sampling')
     parser.add_argument('--warm_up_epochs', default=0, type=int, help='Number of warmup epochs for negative sampling')
-    parser.add_argument('--centroid_momentum', type=float, default=0.9)
-    parser.add_argument('--negative_centroid', type=bool, default=False)
-    parser.add_argument('--neg_loss', type=str, default="simclr", choices=['simclr', 'supcon'], help="loss for negative sampling")
+    parser.add_argument('--neg_loss', type=str, default="simclr", choices=['simclr', 'supcon', 'mae'], help="loss for negative sampling")
     parser.add_argument('--sampling_frequency', type=int, default=0, help="Frequency to sample hard negative")
-
     # supcon setting
     parser.add_argument('--classes', default=128, type=int, help="Classes for sup con")
     
@@ -76,6 +71,7 @@ def merge_config_with_args(args):
     return args
 
 def main(args):
+
     
     if args.mode == "simclr_supcon":
         mean = (0.5071, 0.4867, 0.4408) # cifar100
@@ -84,16 +80,16 @@ def main(args):
         test_transform = get_test_transform(args.size, mean, std)
     elif args.mode == "simclr":
         train_transform = SimCLRTransform(input_size=224)
-        test_transform = SimCLRTransform(input_size=224)
-        #mean = (0.5071, 0.4867, 0.4408) # cifar100
-        #std = (0.2675, 0.2565, 0.2761)
-        #train_transform = get_train_transform(args.size, mean, std)
-        #test_transform = get_test_transform(args.size, mean, std)
+        test_transform = SimCLRTransform(input_size=224)   
     elif args.mode == "mae":
-        train_transform = MAETransform(input_size=224)
-        test_transform = MAETransform(input_size=224)
+            train_transform = MAETransform(input_size=224)
+            test_transform = MAETransform(input_size=224)
 
-    train_dataset = CustomDataset(args.train_annotation, args.img_dir, TwoCropTransform(train_transform))
+    if args.mode == "simclr_supcon":
+        train_dataset = CustomDataset(args.train_annotation, args.img_dir, TwoCropTransform(train_transform))
+    else:
+        train_dataset = CustomDataset(args.train_annotation, args.img_dir, train_transform)
+
     test_dataset = CustomDataset(args.test_annotation, args.img_dir, test_transform)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, 
                               shuffle=True, num_workers = args.num_workers)
@@ -103,7 +99,10 @@ def main(args):
     if args.mode == "simclr_supcon":
         model = SupConResNet(name=args.model, feat_dim=args.classes)
     elif args.mode == "simclr":
-        resnet = torchvision.models.resnet18()
+        if args.model == "resnet18":
+            resnet = torchvision.models.resnet18()
+        elif args.model == "resnet50":
+            resnet = torchvision.models.resnet50()
         backbone = nn.Sequential(*list(resnet.children())[:-1])
         model = SimCLR(backbone)
     elif args.mode == "mae":

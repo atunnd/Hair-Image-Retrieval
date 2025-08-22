@@ -18,65 +18,6 @@ from lightly.models.modules import MAEDecoderTIMM, MaskedVisionTransformerTIMM
 from lightly.transforms import MAETransform
 from lightly.models.utils import deactivate_requires_grad, update_momentum
 
-class MAE(nn.Module):
-    def __init__(self, vit):
-        super().__init__()
-
-        decoder_dim = 512
-        self.mask_ratio = 0.75
-        self.patch_size = vit.patch_embed.patch_size[0]
-
-        self.backbone = MaskedVisionTransformerTIMM(vit=vit)
-        self.sequence_length = self.backbone.sequence_length
-        self.decoder = MAEDecoderTIMM(
-            num_patches=vit.patch_embed.num_patches,
-            patch_size=self.patch_size,
-            embed_dim=vit.embed_dim,
-            decoder_embed_dim=decoder_dim,
-            decoder_depth=1,
-            decoder_num_heads=16,
-            mlp_ratio=4.0,
-            proj_drop_rate=0.0,
-            attn_drop_rate=0.0,
-        )
-
-    def forward_encoder(self, images, idx_keep=None):
-        return self.backbone.encode(images=images, idx_keep=idx_keep)
-
-    def forward_decoder(self, x_encoded, idx_keep, idx_mask):
-        # build decoder input
-        batch_size = x_encoded.shape[0]
-        x_decode = self.decoder.embed(x_encoded)
-        x_masked = utils.repeat_token(
-            self.decoder.mask_token, (batch_size, self.sequence_length)
-        )
-        x_masked = utils.set_at_index(x_masked, idx_keep, x_decode.type_as(x_masked))
-
-        # decoder forward pass
-        x_decoded = self.decoder.decode(x_masked)
-
-        # predict pixel values for masked tokens
-        x_pred = utils.get_at_index(x_decoded, idx_mask)
-        x_pred = self.decoder.predict(x_pred)
-        return x_pred
-
-    def forward(self, images):
-        batch_size = images.shape[0]
-        idx_keep, idx_mask = utils.random_token_mask(
-            size=(batch_size, self.sequence_length),
-            mask_ratio=self.mask_ratio,
-            device=images.device,
-        )
-        x_encoded = self.forward_encoder(images=images, idx_keep=idx_keep)
-        x_pred = self.forward_decoder(
-            x_encoded=x_encoded, idx_keep=idx_keep, idx_mask=idx_mask
-        )
-
-        # get image patches for masked tokens
-        patches = utils.patchify(images, self.patch_size)
-        # must adjust idx_mask for missing class token
-        target = utils.get_at_index(patches, idx_mask - 1)
-        return x_pred, target
 
 class SimCLR(nn.Module):
     def __init__(self, backbone):
@@ -84,20 +25,12 @@ class SimCLR(nn.Module):
         self.backbone = backbone
         self.projection_head = SimCLRProjectionHead(512, 512, 128)
 
-        self.backbone_momentum = copy.deepcopy(self.backbone)
-        self.projection_head_momentum = copy.deepcopy(self.projection_head)
-
-        deactivate_requires_grad(self.backbone_momentum)
-        deactivate_requires_grad(self.projection_head_momentum)
+        #self.backbone_momentum = copy.deepcopy(self.backbone)
+        #self.projection_head_momentum = copy.deepcopy(self.projection_head)
 
     def forward(self, x):
         x = self.backbone(x).flatten(start_dim=1)
         z = self.projection_head(x)
-        return z
-
-    def forward_momentum(self, x):
-        x = self.backbone_momentum(x).flatten(start_dim=1)
-        z = self.projection_head_momentum(x).detach()
         return z
     
 
@@ -375,4 +308,4 @@ class MAE(nn.Module):
         patches = utils.patchify(images, self.patch_size)
         # must adjust idx_mask for missing class token
         target = utils.get_at_index(patches, idx_mask - 1)
-        return x_pred, target
+        return x_pred, target, x_encoded
