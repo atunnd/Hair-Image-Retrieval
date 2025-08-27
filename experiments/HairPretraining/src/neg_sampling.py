@@ -4,7 +4,7 @@ import numpy as np
 from collections import defaultdict, Counter
 #import faiss
 import os
-from .backbone import SimCLR
+from .backbone import OriginSimCLR
 import torchvision
 import torch.nn as nn
 
@@ -146,7 +146,7 @@ def NegSamplerNN(batch: torch.Tensor, k: int, metric: str):
     device = batch.device
     resnet = torchvision.models.resnet18()
     backbone = nn.Sequential(*list(resnet.children())[:-1])
-    model = SimCLR(backbone, model="resnet18").to(device)
+    model = OriginSimCLR(backbone, model="resnet18").to(device)
     #model = SimCLR(backbone).to(device)
     checkpoint_path = "/data2/dragonzakura/QuocAnh/Composed-Image-Retrieval/experiments/HairPretraining/output_dir/simclr_60k/cpkt_450.pth"
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))

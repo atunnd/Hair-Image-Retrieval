@@ -42,6 +42,37 @@ import torchvision.models as models
 #         x = self.relu(self.fc1(x))
 #         return self.fc2(x)
 
+import copy
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torchvision import models
+
+# Giả sử SimCLRProjectionHead (nếu dùng lightly, import; đây là placeholder)
+import copy
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torchvision import models
+
+# Giả sử SimCLRProjectionHead (nếu dùng lightly, import; đây là placeholder)
+import copy
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torchvision import models
+
+# Giả sử SimCLRProjectionHead (nếu dùng lightly, import; đây là placeholder)
+
+import copy
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torchvision import models
+
+# Giả sử SimCLRProjectionHead (nếu dùng lightly, import; đây là placeholder)
+
+
 class AttentionPooling(nn.Module):
     def __init__(self, dim):
         super().__init__()
@@ -49,20 +80,26 @@ class AttentionPooling(nn.Module):
 
     def forward(self, x):  # x: [batch, seq_len, dim]
         # Use CLS as query, patches as key/value
-        query = x[:, :1, :]  # CLS as query
-        key_value = x[:, 1:, :]  # Patches
-        attn_output, _ = self.attn(query, key_value, key_value)
-        return attn_output.squeeze(1)  # [batch, dim]
+        query = x[:, :1, :]  # [batch, 1, dim]
+        key_value = x[:, 1:, :]  # [batch, num_patches, dim]
+        attn_output, attn_weights = self.attn(query, key_value, key_value, need_weights=True)
+        # attn_weights: [batch, 1, num_patches]
+        return attn_output.squeeze(1), attn_weights.squeeze(1)  # [batch, dim], [batch, num_patches]
 
-# Custom ViT backbone to handle full feature extraction (exclude heads)
+# Custom ViT backbone with SVF integrated
 class ViTBackbone(nn.Module):
-    def __init__(self, vit_model):
+    def __init__(self, vit_model, k=50):  # k for top-k in SVF
         super().__init__()
         self.conv_proj = vit_model.conv_proj
         self.class_token = vit_model.class_token
         self.pos_embed = vit_model.encoder.pos_embedding
         self.dropout = vit_model.dropout
-        self.encoder = vit_model.encoder  # Includes layers and final LN
+        self.encoder_layers = vit_model.encoder.layers  # List of transformer layers
+        self.final_ln = vit_model.encoder.ln  # Final LayerNorm
+        self.num_layers = len(self.encoder_layers)
+        self.k = k  # Top-k for SVF
+        self.hidden_dim = vit_model.hidden_dim
+        self.token_importance_gen = nn.Linear(self.hidden_dim, 1)  # Ω for Z in SVF
 
     def forward(self, x):
         # Patch embedding
@@ -76,24 +113,66 @@ class ViTBackbone(nn.Module):
         # Add positional embedding
         x = x + self.pos_embed
         
-        # Dropout and encoder
-        #x = self.dropout(x)
-        x = self.encoder(x)  # [batch, seq_len, embed_dim]
+        # Dropout
+        # x = self.dropout(x)
         
-        return x
+        # Apply encoder layers up to penultimate
+        for i in range(self.num_layers - 1):
+            x = self.encoder_layers[i](x)
+        
+        # SVF at penultimate layer
+        penultimate_layer = self.encoder_layers[-2]
+        # To get attn_weights, call self-attn (assuming standard ViT layer with self_attention)
+        self_attn = penultimate_layer.self_attention  # Adjust if layer structure differs
+        _, attn_weights = self_attn(x, x, x, need_weights=True, average_attn_weights=False)  # attn_weights [batch, num_heads, seq_len, seq_len]
+        
+        # Extract CLS attention to patches: A [batch, num_heads, num_patches]
+        A = attn_weights[:, :, 0, 1:]  # CLS query to patches
+        
+        # Aggregate heads: Â = sum over heads
+        A_hat = A.sum(dim=1)  # [batch, num_patches]
+        
+        # Token importance Z = sigmoid(Ω(E_i)), E_i are patches from x[:, 1:, :]
+        patches = x[:, 1:, :]  # [batch, num_patches, dim]
+        Z = torch.sigmoid(self.token_importance_gen(patches)).squeeze(-1)  # [batch, num_patches]
+        
+        # O = Â ⊕ (Â ⊗ Z)
+        O = A_hat + (A_hat * Z)  # [batch, num_patches]
+        
+        # Top-k indices based on O
+        _, top_indices = O.topk(self.k, dim=1, sorted=False)  # [batch, k]
+        
+        # Gather top-k patches
+        top_patches = torch.gather(patches, 1, top_indices.unsqueeze(-1).expand(-1, -1, self.hidden_dim))  # [batch, k, dim]
+        
+        # New sequence for last layer: CLS + top-k patches
+        cls_token = x[:, 0, :].unsqueeze(1)  # [batch, 1, dim]
+        input_last_layer = torch.cat([cls_token, top_patches], dim=1)  # [batch, 1+k, dim]
+        
+        # Apply last layer
+        x = self.encoder_layers[-1](input_last_layer)
+        
+        # Final LN
+        x = self.final_ln(x)
+        
+        return x  # [batch, 1+k, dim]
 
 class SimCLR(nn.Module):
-    def __init__(self, backbone, model=None, attention_pooling=False):
+    def __init__(self, backbone, model=None, attention_pooling=False, k=50, fusion_type='transformer'):
         super().__init__()
         self.model = model
         self.attn_pooling = attention_pooling
+        self.k = k  # For SVF
+        self.fusion_type = fusion_type  # 'transformer' as requested
         
-        # Handle backbone: For ViT, wrap it
-        if "vit" in str(model):
+        # Handle backbone: For ViT, wrap it with SVF
+        if "vit" in str(self.model):
             vit = models.vit_b_16()  # Load full ViT if backbone is not already wrapped
-            self.backbone = ViTBackbone(vit)
+            self.backbone = ViTBackbone(vit, k=self.k)
             proj_input_dim = 768  # For vit_b_16
             output_dim = 512
+            # Fusion module: Transformer as requested
+            self.fusion_module = nn.TransformerEncoderLayer(d_model=proj_input_dim, nhead=8, batch_first=True)
         else:
             self.backbone = backbone  # Assume ResNet-like, already Sequential[:-1]
             if model == "resnet18":
@@ -107,34 +186,59 @@ class SimCLR(nn.Module):
         
         self.projection_head = SimCLRProjectionHead(proj_input_dim, proj_input_dim, output_dim)
         
-        if self.attn_pooling and "vit" in str(model):
+        if self.attn_pooling and "vit" in str(self.model):
             self.pooled = AttentionPooling(proj_input_dim)
         elif self.attn_pooling:
             print("Warning: Attention pooling only for ViT")
+        
+        self.backbone_momentum = copy.deepcopy(self.backbone)
+        self.projection_head_momentum = copy.deepcopy(self.projection_head)
+        for param in self.backbone_momentum.parameters():
+            param.requires_grad = False
+        for param in self.projection_head_momentum.parameters():
+            param.requires_grad = False
 
-    def forward(self, x):
-        x = self.backbone(x)  # ResNet: [batch, features, 1, 1]; ViT: [batch, seq_len, dim]
+    def _internal_forward(self, backbone, projection_head, x):
+        x = backbone(x)  # [batch, 1+k, dim] after SVF
         
         if "vit" in str(self.model):
-            if self.attn_pooling:
-                cls_token = x[:, 0, :]
-                patch_token = self.pooled(x)  # [batch, dim]
-                z = self.projection_head(cls_token)
-            else:
-                cls_token = x[:, 0, :]  # CLS token [batch, dim]
-                patch_token = x[:, 1:, :]
-                z = self.projection_head(cls_token)
+            cls_token = x[:, 0, :]  # [batch, dim]
+            patch_token = x[:, 1:, :]  # Top-k patches [batch, k, dim]
+            
+            # Fusion with transformer (as requested)
+            fused_input = torch.stack([cls_token, patch_token.mean(dim=1)], dim=1)  # [batch, 2, dim] (mean patch as summary for fusion)
+            fused_output = self.fusion_module(fused_input)  # [batch, 2, dim]
+            final_cls = fused_output[:, 0, :]  # [batch, dim]
+            
+            z = projection_head(final_cls)
             return z, patch_token
             
         else:
             x = x.flatten(start_dim=1)  # For CNN like ResNet [batch, features]
-            z = self.projection_head(x)
-        return z, None
+            z = projection_head(x)
+            return z, None
+
+    def forward(self, x):
+        return self._internal_forward(self.backbone, self.projection_head, x)
+
+    def forward_momentum(self, x):
+        return self._internal_forward(self.backbone_momentum, self.projection_head_momentum, x)
     
     def extract_features(self, x):
-        x = self.backbone(x).flatten(start_dim=1)
-        return x
-    
+        features = self.backbone(x)  # [batch, 1+k, dim] for ViT
+        
+        if "vit" in str(self.model):
+            cls_token = features[:, 0, :]
+            patch_token = features[:, 1:, :]
+            fused_input = torch.stack([cls_token, patch_token.mean(dim=1)], dim=1)
+            fused_output = self.fusion_module(fused_input)
+            final_cls = fused_output[:, 0, :]
+            return final_cls  # Fused CLS
+        else:
+            return features.flatten(start_dim=1)
+
+
+
 
 class BasicBlock(nn.Module):
     expansion = 1
@@ -164,6 +268,12 @@ class BasicBlock(nn.Module):
             return out, preact
         else:
             return out
+
+
+
+
+
+
 
 
 class Bottleneck(nn.Module):
@@ -477,3 +587,71 @@ class SimMIM(nn.Module):
         target = utils.get_at_index(patches, idx_mask - 1)
 
         return x_out, target
+    
+
+class OriginSimCLR(nn.Module):
+    def __init__(self, backbone, model=None, attention_pooling=False):
+        super().__init__()
+        self.model = model
+        self.attn_pooling = attention_pooling
+        
+        # Handle backbone: For ViT, wrap it
+        if "vit" in str(model):
+            vit = models.vit_b_16()  # Load full ViT if backbone is not already wrapped
+            self.backbone = ViTBackbone(vit)
+            proj_input_dim = 768  # For vit_b_16
+            output_dim = 512
+        else:
+            self.backbone = backbone  # Assume ResNet-like, already Sequential[:-1]
+            if model == "resnet18":
+                proj_input_dim = 512
+                output_dim=128
+            elif model == "resnet50":
+                proj_input_dim = 2048
+                output_dim=1024
+            else:
+                raise ValueError("Unsupported model")
+        
+        self.projection_head = SimCLRProjectionHead(proj_input_dim, proj_input_dim, output_dim)
+        
+        if self.attn_pooling and "vit" in str(model):
+            self.pooled = AttentionPooling(proj_input_dim)
+        elif self.attn_pooling:
+            print("Warning: Attention pooling only for ViT")
+
+    def forward(self, x):
+        x = self.backbone(x)  # ResNet: [batch, features, 1, 1]; ViT: [batch, seq_len, dim]
+        
+        if "vit" in str(self.model):
+            if self.attn_pooling:
+                cls_token = x[:, 0, :]
+                patch_token = self.pooled(x)  # [batch, dim]
+                z = self.projection_head(cls_token)
+            else:
+                cls_token = x[:, 0, :]  # CLS token [batch, dim]
+                patch_token = x[:, 1:, :]
+                z = self.projection_head(cls_token)
+            return z, patch_token
+            
+        else:
+            x = x.flatten(start_dim=1)  # For CNN like ResNet [batch, features]
+            z = self.projection_head(x)
+        return z, None
+    
+    def extract_features(self, x):
+        features = self.backbone(x)  # ResNet: [batch, features, 1, 1]; ViT: [batch, seq_len, dim]
+        
+        if "vit" in str(self.model):
+            # if self.attn_pooling:
+            #     # Use pooled if enabled
+            #     pooled = self.pooled(features)  # [batch, dim]
+            #     cls_token = features[:, 0, :] 
+            #     embedding = torch.cat([cls_token, pooled], dim=1)
+            # else:
+            #     # Default to CLS token
+            #     embedding = features[:, 0, :]  # [batch, dim]
+            embedding = features[:, 0, :]
+        else:
+            embedding = features.flatten(start_dim=1)  # [batch, features] for ResNet-like
+        
+        return embedding  # Always [batch, dim] raw from backbone

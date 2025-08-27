@@ -65,6 +65,7 @@ def parse_args():
 
     # ViT settings
     parser.add_argument('--atn_pooling', default=False, type=bool, help='attention pooling for constrative learning')
+    parser.add_argument('--fusion_type', default="mlp", type=str, choices=["mlp", "transformer"])
     
 
     return parser.parse_args()
@@ -127,7 +128,7 @@ def main(args):
             backbone=None
             output_dim= 512
         #backbone = nn.Sequential(*list(backbone.children())[:-1])
-        model = SimCLR(backbone, args.model, attention_pooling = args.atn_pooling)
+        model = SimCLR(backbone, args.model, attention_pooling = args.atn_pooling, fusion_type=args.fusion_type)
 
     elif args.mode == "mae":
         vit = vit_base_patch16_224()

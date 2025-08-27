@@ -6,8 +6,8 @@ from tqdm import tqdm
 import os
 
 import lightly
-from lightly.loss import NTXentLoss, DINOLoss
-from utils.losses import SupConLoss
+from lightly.loss import NTXentLoss
+from utils.losses import SupConLoss, DINOLoss
 from utils.utils import get_optimizer, linear_increase_alpha, margin_decay, mse_alignment_loss
 from utils.transform import positive_transform, negative_transform, PositiveMaskingTransform
 
@@ -52,6 +52,7 @@ class Trainer:
         self.mode_model = args.model
 
         if args.neg_sample:
+
             # neg samling
             self.neg_sampling = True
             self.warm_up_epochs = args.warm_up_epochs
@@ -59,7 +60,7 @@ class Trainer:
 
             self.margin_step=0
 
-            self.save_path = os.path.join(self.save_path, f"{self.mode}_{self.mode_model}_neg_sample_supervised_mse_static_alpha_patch_{args.atn_pooling}")
+            self.save_path = os.path.join(self.save_path, f"{self.mode}_{self.mode_model}_neg_sample_supervised_mse_static_alpha_patch_{args.atn_pooling}_{args.fusion_type}")
             print("Training with supervised neg sample")
             
             os.makedirs(self.save_path, exist_ok=True)
@@ -81,7 +82,10 @@ class Trainer:
 
             # extract negative sample
             self.negative_batch_idx =[]
-            for batch in self.train_loader:
+
+            
+
+            for batch in tqdm(self.train_loader, desc="Negative mining"):
                 #images = batch[0][1]
                 images = batch[0][0]
                 images = images.to(self.device)
@@ -109,7 +113,7 @@ class Trainer:
             #loss.backward()
             scaler.scale(loss).backward()
             #self.optimizer.step()
-            scaler.scale(self.optimizer).step()
+            scaler.step(self.optimizer)
             scaler.update()
             self.optimizer.zero_grad() 
         return running_loss / len(self.train_loader)
@@ -127,9 +131,10 @@ class Trainer:
             #loss.backward()
             scaler.scale(loss).backward()
             #self.optimizer.step()
-            scaler.scale(self.optimizer).step()
+            scaler.step(self.optimizer)
             scaler.update()
             self.optimizer.zero_grad()
+
         return running_loss / len(self.train_loader)
 
     def train_one_epoch_simclr_supcon(self, epoch=0, alpha=0, scaler=None):
@@ -152,9 +157,10 @@ class Trainer:
             #loss.backward()
             scaler.scale(loss).backward()
             #self.optimizer.step()
-            scaler.scale(self.optimizer).step()
+            scaler.step(self.optimizer)
             scaler.update()
             self.optimizer.zero_grad()
+
         return running_loss / len(self.train_loader)
     
     def train_one_epoch_dino(self, epoch=0, alpha=0, scaler=None):
@@ -216,11 +222,10 @@ class Trainer:
 
         for batch_id, batch in enumerate(tqdm(self.train_loader, desc="Training with negative samples")):
             images, labels = batch[0], batch[1].to(self.device)
-            # update_momentum(self.model.backbone, self.model.backbone_momentum, m=momentum_val)
-            # update_momentum(
-            #     self.model.projection_head, self.model.projection_head_momentum, m=momentum_val
-            # )
-            # images = [img.to(self.device) for img in images[0]]
+            current_m = momentum_val  # Hoặc: current_m = 0.996 + (0.004 * min(1, epoch / self.warm_up_epochs))
+        
+            update_momentum(self.model.backbone, self.model.backbone_momentum, m=current_m)
+            update_momentum(self.model.projection_head, self.model.projection_head_momentum, m=current_m)
             trip_loss = 0.0
 
             if self.neg_loss == "mae":
@@ -249,15 +254,26 @@ class Trainer:
 
             elif self.neg_loss == "simclr":
                 with torch.cuda.amp.autocast():
-                    neg_batch, neg_batch_patch = self.model(negative_samples)
-                    pos_samples = positive_transform(images1)
-                    pos_batch, pos_batch_patch = self.model(pos_samples)
                     anchor_batch, anchor_batch_patch = self.model(images0)
 
-                    masked_pos_samples= self.positive_masking_transform(pos_samples)
-                    masked_pos_batch, masked_pos_batch_patch = self.model(masked_pos_samples)
-                    masked_pos_batch = masked_pos_batch.detach()
-                    masked_pos_batch_patch = masked_pos_batch_patch.detach()
+                    if "vit" in str(self.mode_model):
+                        with torch.no_grad():
+                            neg_batch, neg_batch_patch = self.model.forward_momentum(negative_samples)
+                            pos_samples = positive_transform(images1)
+                            pos_batch, pos_batch_patch = self.model.forward_momentum(pos_samples)
+                            masked_pos_samples= self.positive_masking_transform(pos_samples)
+                            masked_pos_batch, masked_pos_batch_patch = self.model.forward_momentum(masked_pos_samples)
+                            masked_pos_batch = masked_pos_batch.detach()
+                    else:
+                        neg_batch, neg_batch_patch = self.model(negative_samples)
+                        pos_samples = positive_transform(images1)
+                        pos_batch, pos_batch_patch = self.model(pos_samples)
+                        masked_pos_samples= self.positive_masking_transform(pos_samples)
+                        masked_pos_batch, masked_pos_batch_patch = self.model(masked_pos_samples)
+                        masked_pos_batch = masked_pos_batch.detach()
+
+                    if masked_pos_batch_patch is not None:
+                        masked_pos_batch_patch = masked_pos_batch_patch.detach()
 
             if self.neg_loss == "simclr":
                 neg_batch = F.normalize(neg_batch, p=2, dim=1)

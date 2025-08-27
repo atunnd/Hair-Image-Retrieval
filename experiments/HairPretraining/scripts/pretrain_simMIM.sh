@@ -1,8 +1,7 @@
 #!/bin/bash
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 python mainpretrain.py \
-  --epochs 300 \
+  --epochs 200 \
   --batch_size 256 \
   --device cuda \
   --device_id 2 \
@@ -16,16 +15,10 @@ python mainpretrain.py \
   --beta1 0.9 \
   --beta2 0.999 \
   --temp 0.7 \
-  --mode simclr \
+  --mode simMIM \
   --model vit_b_16 \
   --seed 42 \
   --num_workers 16 \
-  --neg_sample True \
-  --warm_up_epochs 20 \
-  --neg_loss simclr \
-  --sampling_frequency 20 \
-  --atn_pooling True \
-  --fusion_type transformer
 
 
     
