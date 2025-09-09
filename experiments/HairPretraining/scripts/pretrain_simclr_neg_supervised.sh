@@ -1,8 +1,8 @@
 #!/bin/bash
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+#export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 python mainpretrain.py \
-  --epochs 300 \
+  --epochs 100 \
   --batch_size 128 \
   --device cuda \
   --device_id 2 \

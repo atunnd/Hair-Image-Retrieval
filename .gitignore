@@ -16,6 +16,8 @@ __pycache__/
 /dataset_pipeline
 /benchmark
 /benchmark_processing
+/experiments/HairPretraining/output_dir
+/experiments/HairPretraining/classification_output_dir
 
 # Model files
 *.pt

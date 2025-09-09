@@ -7,7 +7,7 @@ from utils.transform import get_test_transform, get_train_transform, TwoCropTran
 from utils.dataloader import CustomDataset
 import torch
 from torch.utils.data import DataLoader
-from src.backbone import SupConResNet, SimCLR, MAE, DINO, SimMIM, SimCLR_Our
+from src.backbone import SupConResNet, SimCLR, MAE, DINOv2, SimMIM, SimCLR_Our
 from utils.transform import DataAugmentationForSIMWithMask
 import torch
 import torchvision
@@ -45,7 +45,7 @@ def parse_args():
     parser.add_argument('--temp', type=float, default=0.7, help="temperature for loss function")
 
     # Model option
-    parser.add_argument('--mode', type=str, default='simclr_supcon', choices=['mae', 'simclr', 'simclr_supcon', 'dino', 'simMIM'])
+    parser.add_argument('--mode', type=str, default='simclr_supcon', choices=['mae', 'simclr', 'simclr_supcon', 'dinov2', 'simMIM'])
     parser.add_argument('--model', type=str, default='resnet18', choices = ['resnet18', 'resnet50', "vit_b_16"])
 
     # Optional config
@@ -83,7 +83,6 @@ def merge_config_with_args(args):
 
 def main(args):
 
-    
     if args.mode == "simclr_supcon":
         mean = (0.5071, 0.4867, 0.4408) # cifar100
         std = (0.2675, 0.2565, 0.2761)
@@ -101,9 +100,15 @@ def main(args):
     elif args.mode == "mae":
         train_transform = MAETransform(input_size=224)
         test_transform = MAETransform(input_size=224)
-    elif args.mode == "dino":
-        train_transform = DINOTransform()
-        test_transform = DINOTransform()
+    elif args.mode == "dinov2":
+        train_transform = DINOTransform(
+            global_crop_scale=(0.32, 1),
+            local_crop_scale=(0.05, 0.32),
+            n_local_views=8,)
+        test_transform = DINOTransform(
+            global_crop_scale=(0.32, 1),
+            local_crop_scale=(0.05, 0.32),
+            n_local_views=8,)
     elif args.mode == "simMIM":
         train_transform = MAETransform(input_size=224)
         test_transform = MAETransform(input_size=224)
@@ -111,7 +116,7 @@ def main(args):
     if args.mode == "simclr_supcon":
         train_dataset = CustomDataset(annotations_file=args.train_annotation, img_dir=args.img_dir, transform=TwoCropTransform(train_transform))
     else:
-        train_dataset = CustomDataset(annotations_file=args.train_annotation, img_dir=args.img_dir, transform=train_transform, original_img_dir=args.img_dir_origin, our_method=True)
+        train_dataset = CustomDataset(annotations_file=args.train_annotation, img_dir=args.img_dir, transform=train_transform, original_img_dir=args.img_dir_origin, our_method=args.neg_sample)
 
     #test_dataset = CustomDataset(annotations_file=args.test_annotation, img_dir=args.img_dir, transform=test_transform)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, 
@@ -146,11 +151,11 @@ def main(args):
         vit = vit_base_patch16_224()
         model = MAE(vit)
     
-    # elif args.mode == "dino":
-    #     #backbone = torch.hub.load('facebookresearch/dino:main', 'dino_vits16', pretrained=False, source="github")
-    #     backbone = vits.vit_base(patch_size=16)
-    #     input_dim = backbone.embed_dim
-    #     model = DINO(backbone, input_dim)
+    elif args.mode == "dinov2":
+        #backbone = torch.hub.load('facebookresearch/dino:main', 'dino_vits16', pretrained=False, source="github")
+        #backbone = vits.vit_base(patch_size=16)
+        #input_dim = backbone.embed_dim
+        model = DINOv2()
 
     elif args.mode == "simMIM":
         vit = torchvision.models.vit_b_16(pretrained=False)

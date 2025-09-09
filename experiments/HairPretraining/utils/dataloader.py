@@ -12,7 +12,7 @@ import numpy as np
 
 class CustomDataset(Dataset):
     def __init__(self, annotations_file, img_dir, transform=None, transform_target=None, original_img_dir=None, our_method=False):
-        self.img_labels = pd.read_csv(annotations_file)[:20000]
+        self.img_labels = pd.read_csv(annotations_file)[:10000]
         self.img_dir = img_dir
         self.transform = transform
         self.transform_target = transform_target
@@ -30,7 +30,7 @@ class CustomDataset(Dataset):
         img_name_origin = f"{img_name[:6]}.jpg"
         #img_origin_path = os.path.join(self.original_img_dir, img_name_origin)
 
-        if self.our_method:
+        if self.our_method is True:
             try:
                 image_orig = cv2.cvtColor(cv2.imread(img_path), cv2.COLOR_BGR2RGB)  # (H, W, 3)
                 mask_orig  = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE) 
