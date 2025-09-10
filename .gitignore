@@ -18,6 +18,9 @@ __pycache__/
 /benchmark_processing
 /experiments/HairPretraining/output_dir
 /experiments/HairPretraining/classification_output_dir
+/experiments/HairPretraining/dino
+/experiments/HairPretraining/dinov3
+/experiments/HairPretraining/weights
 
 # Model files
 *.pt
