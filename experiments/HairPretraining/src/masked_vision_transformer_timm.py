@@ -85,7 +85,6 @@ class MaskedVisionTransformerTIMM(MaskedVisionTransformer):
         elif self.vit.global_pool:
             x = x[:, 0]  # class token
         
-        print("class token: ", x.shape)
         return x
 
     def forward_intermediates(
@@ -130,61 +129,63 @@ class MaskedVisionTransformerTIMM(MaskedVisionTransformer):
         # normalization layer
         tokens = self.vit.norm_pre(tokens)
         # apply Transformer blocks
-        if hair_region_idx is not None:
-            # hair_mask: [batch_size, num_patches], binary (1 for hair patches, 0 otherwise)
-            for i, blk in enumerate(self.vit.blocks[:-1]):
-                tokens = blk(tokens)  # [batch_size, num_patches + 1, dim]
+        # if hair_region_idx is not None:
+        #     # hair_mask: [batch_size, num_patches], binary (1 for hair patches, 0 otherwise)
+        #     for i, blk in enumerate(self.vit.blocks[:-1]):
+        #         tokens = blk(tokens)  # [batch_size, num_patches + 1, dim]
 
-            hair_mask =hair_region_idx.permute(0, 2, 1).squeeze(2)
+        #     hair_mask =hair_region_idx.permute(0, 2, 1).squeeze(2)
 
-            batch_size, _, dim = tokens.shape
-            cls_token = tokens[:, 0:1, :]  # [batch_size, 1, dim]
-            patch_tokens = tokens[:, 1:, :]  # [batch_size, num_patches, dim]
+        #     batch_size, _, dim = tokens.shape
+        #     cls_token = tokens[:, 0:1, :]  # [batch_size, 1, dim]
+        #     patch_tokens = tokens[:, 1:, :]  # [batch_size, num_patches, dim]
 
-            # Pad hair patches to fixed length (vectorized)
-            num_hair_patches = hair_mask.sum(dim=1).long()  # [batch_size]
-            max_patches = min(num_hair_patches.max(), max_patches)
-            reduced_seq_len = 1 + max_patches
-            num_valid = torch.min(num_hair_patches, torch.tensor(max_patches, device=device))  # [batch_size]
+        #     # Pad hair patches to fixed length (vectorized)
+        #     num_hair_patches = hair_mask.sum(dim=1).long()  # [batch_size]
+        #     max_patches = min(num_hair_patches.max(), max_patches)
+        #     reduced_seq_len = 1 + max_patches
+        #     num_valid = torch.min(num_hair_patches, torch.tensor(max_patches, device=device))  # [batch_size]
 
-            # Vectorized patch selection with topk
-            valid_indices = torch.zeros(batch_size, max_patches, dtype=torch.long, device=device)
-            for b in range(batch_size):
-                if num_valid[b] > 0:
-                    valid_indices[b, :num_valid[b]], _ = torch.topk(hair_mask[b], k=num_valid[b], largest=True)
-            idx_expanded = valid_indices.unsqueeze(-1).expand(-1, -1, dim)
-            hair_patches_padded = torch.gather(patch_tokens, 1, idx_expanded)
+        #     # Vectorized patch selection with topk
+        #     valid_indices = torch.zeros(batch_size, max_patches, dtype=torch.long, device=device)
+        #     for b in range(batch_size):
+        #         if num_valid[b] > 0:
+        #             valid_indices[b, :num_valid[b]], _ = torch.topk(hair_mask[b], k=num_valid[b], largest=True)
+        #     idx_expanded = valid_indices.unsqueeze(-1).expand(-1, -1, dim)
+        #     hair_patches_padded = torch.gather(patch_tokens, 1, idx_expanded)
 
-            # Create attention mask without inplace operations
-            attn_mask = torch.ones(batch_size, reduced_seq_len, reduced_seq_len, device=device) * float('-inf')
-            # CLS attends to all and all attend to CLS
-            attn_mask[:, :, 0] = 0
-            attn_mask[:, 0, :] = 0
-            # Hair patches attend to each other
-            mask = torch.arange(max_patches, device=device).unsqueeze(0) < num_valid.unsqueeze(1)  # [batch_size, max_patches]
-            attn_mask = attn_mask.scatter_(
-                1, (mask.unsqueeze(1) * torch.ones(1, reduced_seq_len, 1, device=device)).long(), 0
-            )
-            attn_mask = attn_mask.scatter_(
-                2, (mask.unsqueeze(2) * torch.ones(1, 1, reduced_seq_len, device=device)).long(), 0
-            )
-            # Expand for multi-head attention
-            attn_mask = attn_mask.unsqueeze(1).expand(-1, 12, -1, -1)  # [32, 12, 101, 101]
+        #     # Create attention mask without inplace operations
+        #     attn_mask = torch.ones(batch_size, reduced_seq_len, reduced_seq_len, device=device) * float('-inf')
+        #     # CLS attends to all and all attend to CLS
+        #     attn_mask[:, :, 0] = 0
+        #     attn_mask[:, 0, :] = 0
+        #     # Hair patches attend to each other
+        #     mask = torch.arange(max_patches, device=device).unsqueeze(0) < num_valid.unsqueeze(1)  # [batch_size, max_patches]
+        #     attn_mask = attn_mask.scatter_(
+        #         1, (mask.unsqueeze(1) * torch.ones(1, reduced_seq_len, 1, device=device)).long(), 0
+        #     )
+        #     attn_mask = attn_mask.scatter_(
+        #         2, (mask.unsqueeze(2) * torch.ones(1, 1, reduced_seq_len, device=device)).long(), 0
+        #     )
+        #     # Expand for multi-head attention
+        #     attn_mask = attn_mask.unsqueeze(1).expand(-1, 12, -1, -1)  # [32, 12, 101, 101]
 
-            x_input_L = torch.cat([cls_token, hair_patches_padded], dim=1)  # [batch_size, 1 + max_patches, dim]
+        #     x_input_L = torch.cat([cls_token, hair_patches_padded], dim=1)  # [batch_size, 1 + max_patches, dim]
 
-            # Apply Mask-Guided Attention at layer L
-            last_layer = self.vit.blocks[-1]
-            x_norm = last_layer.norm1(x_input_L)
-            attn_output = last_layer.attn(x_norm, attn_mask=attn_mask)  # timm Attention
-            tokens = x_input_L + attn_output
-            tokens = tokens + last_layer.mlp(last_layer.norm2(tokens))
-            tokens = self.vit.norm(tokens)
-            #print("=> tokens hair: ", tokens.shape) # torch.Size([32, 101, 768])
-        else:
-            tokens = self.vit.blocks(tokens)
-            tokens = self.vit.norm(tokens)
-            #print("=> tokens for reconstruction: ", tokens.shape) # torch.Size([32, 50, 768])
+        #     # Apply Mask-Guided Attention at layer L
+        #     last_layer = self.vit.blocks[-1]
+        #     x_norm = last_layer.norm1(x_input_L)
+        #     attn_output = last_layer.attn(x_norm, attn_mask=attn_mask)  # timm Attention
+        #     tokens = x_input_L + attn_output
+        #     tokens = tokens + last_layer.mlp(last_layer.norm2(tokens))
+        #     tokens = self.vit.norm(tokens)
+        #     #print("=> tokens hair: ", tokens.shape) # torch.Size([32, 101, 768])
+        # else:
+        #     tokens = self.vit.blocks(tokens)
+        #     tokens = self.vit.norm(tokens)
+        #     #print("=> tokens for reconstruction: ", tokens.shape) # torch.Size([32, 50, 768])
+        tokens = self.vit.blocks(tokens)
+        tokens = self.vit.norm(tokens)
         return tokens
 
     def images_to_tokens(self, images: Tensor) -> Tensor:

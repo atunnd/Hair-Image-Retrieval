@@ -3,7 +3,7 @@
 
 python mainpretrain.py \
   --epochs 100 \
-  --batch_size 128 \
+  --batch_size 256 \
   --device cuda \
   --device_id 2 \
   --save_path output_dir \
@@ -20,7 +20,7 @@ python mainpretrain.py \
   --mode simclr \
   --model vit_b_16 \
   --seed 42 \
-  --num_workers 8 \
+  --num_workers 0 \
   --neg_sample True \
   --warm_up_epochs 20 \
   --neg_loss simclr \

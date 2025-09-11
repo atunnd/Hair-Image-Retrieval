@@ -20,6 +20,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.utils.tensorboard import SummaryWriter
 
 
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Self-supervised/Supervised Trainer Arguments")
 
@@ -91,12 +92,12 @@ def main(args):
     elif args.mode == "simclr":
         train_transform = SimCLRTransform(input_size=224)
         test_transform = SimCLRTransform(input_size=224)   
-        if "vit" in str(args.model):
-            aug_args = type('', (), {})()
-            aug_args.input_size = args.size
-            aug_args.crop_min = args.crop_min
-            aug = DataAugmentationForSIMWithMask(aug_args)
-            train_transform = aug
+        # if "vit" in str(args.model):
+        #     aug_args = type('', (), {})()
+        #     aug_args.input_size = args.size
+        #     aug_args.crop_min = args.crop_min
+        #     aug = DataAugmentationForSIMWithMask(aug_args)
+        #     train_transform = aug
     elif args.mode == "mae":
         train_transform = MAETransform(input_size=224)
         test_transform = MAETransform(input_size=224)
