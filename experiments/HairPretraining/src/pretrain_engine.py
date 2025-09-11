@@ -317,11 +317,11 @@ class Trainer:
 
         for batch_id, batch in enumerate(tqdm(self.train_loader, desc="Training with negative samples")):
             images, hair_region_idx = batch[0], batch[1]
-            current_m = momentum_val  # Hoặc: current_m = 0.996 + (0.004 * min(1, epoch / self.warm_up_epochs))
+            # current_m = momentum_val  # Hoặc: current_m = 0.996 + (0.004 * min(1, epoch / self.warm_up_epochs))
         
-            update_momentum(self.model.backbone, self.model.backbone_momentum, m=current_m)
-            update_momentum(self.model.projection_head, self.model.projection_head_momentum, m=current_m)
-            update_momentum(self.model.decoder, self.model.decoder_momentum, m=current_m)
+            # update_momentum(self.model.backbone, self.model.backbone_momentum, m=current_m)
+            # update_momentum(self.model.projection_head, self.model.projection_head_momentum, m=current_m)
+            # update_momentum(self.model.decoder, self.model.decoder_momentum, m=current_m)
             trip_loss = 0.0
 
             if self.neg_loss == "mae":
@@ -351,25 +351,28 @@ class Trainer:
                 # print("image0: ", images0.shape, hair_region_idx0.shape)
                 # print("image1: ", images1.shape, hair_region_idx1.shape)
                 # print("image2: ", images2.shape, hair_region_idx2.shape)
-                anchor_batch, anchor_batch_patch_prediction, anchor_batch_patch_target = self.model(images0, hair_region_idx=hair_region_idx0)
-                pos_samples = images1
-                pos_batch, pos_batch_patch_prediction, pos_batch_patch_target = self.model.forward_momentum(pos_samples, hair_region_idx=hair_region_idx1, reconstruction=True)
-                pos_samples = images1
-                neg_batch_patch=None
-                if "vit" in str(self.mode_model):
-                    with torch.no_grad():
-                        neg_batch, _, _ = self.model.forward_momentum(negative_samples, hair_region_idx=hair_region_idx2)
+                # anchor_batch, anchor_batch_patch_prediction, anchor_batch_patch_target = self.model(images0, hair_region_idx=hair_region_idx0)
+                # pos_samples = images1
+                # pos_batch, pos_batch_patch_prediction, pos_batch_patch_target = self.model.forward_momentum(pos_samples, hair_region_idx=hair_region_idx1, reconstruction=True)
+                # pos_samples = images1
+                # neg_batch_patch=None
+                # if "vit" in str(self.mode_model):
+                #     with torch.no_grad():
+                #         neg_batch, _, _ = self.model.forward_momentum(negative_samples, hair_region_idx=hair_region_idx2)
                         
-                    print("anchor: ", anchor_batch.shape, anchor_batch.min(), anchor_batch.max()) # [32, 512]
-                    print("pos sample: ", pos_batch.shape, pos_batch.min(), pos_batch.max()) # [32, 512]
-                    print("neg sample: ", neg_batch.shape, neg_batch.min(), neg_batch.max()) # [32, 512]
-                else:
+                #     print("anchor: ", anchor_batch.shape, anchor_batch.min(), anchor_batch.max()) # [32, 512]
+                #     print("pos sample: ", pos_batch.shape, pos_batch.min(), pos_batch.max()) # [32, 512]
+                #     print("neg sample: ", neg_batch.shape, neg_batch.min(), neg_batch.max()) # [32, 512]
+                # else:
+                anchor_batch, anchor_batch_patch = self.model(images0)
+                pos_samples = positive_transform(images1)
+                pos_batch, pos_batch_patch = self.model(pos_samples)
+                with torch.no_grad():
                     neg_batch, neg_batch_patch = self.model(negative_samples)
-                    pos_samples = positive_transform(images1)
-                    pos_batch, pos_batch_patch = self.model(pos_samples)
                     masked_pos_samples= self.positive_masking_transform(pos_samples)
                     masked_pos_batch, masked_pos_batch_patch = self.model(masked_pos_samples)
                     masked_pos_batch = masked_pos_batch.detach()
+                    masked_pos_batch_patch = masked_pos_batch_patch.detach()
 
                 # if masked_pos_batch_patch is not None:
                 #     masked_pos_batch_patch = masked_pos_batch_patch.detach()
@@ -378,7 +381,7 @@ class Trainer:
                 neg_batch = F.normalize(neg_batch, p=2, dim=1)
                 pos_batch = F.normalize(pos_batch, p=2, dim=1)
                 anchor_batch = F.normalize(anchor_batch, p=2, dim=1)
-                #masked_pos_batch = F.normalize(masked_pos_batch, p=2, dim=1)
+                masked_pos_batch = F.normalize(masked_pos_batch, p=2, dim=1)
                 if neg_batch_patch is not None:
                     neg_batch_patch = F.normalize(neg_batch_patch, p=2, dim=1)
                     pos_batch_patch = F.normalize(pos_batch_patch, p=2, dim=1)
@@ -409,7 +412,7 @@ class Trainer:
                     running_loss2 += nt_xent_loss.item()
 
                     if "vit" in str(self.mode_model):
-                        mse_loss = F.mse_loss(anchor_batch_patch_prediction, anchor_batch_patch_target, reduction="mean")
+                        mse_loss = F.mse_loss(pos_batch_patch, masked_pos_batch_patch, reduction="mean")
                     else:
                         if neg_batch_patch is None:
                             mse_loss = F.mse_loss(pos_batch, masked_pos_batch, reduction='mean')

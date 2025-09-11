@@ -287,30 +287,6 @@ class SimCLR_Our(nn.Module):
         else:
             return self.backbone_momentum.encode(images=images, idx_keep=idx_keep)
 
-    def forward_decoder(self, x_encoded, idx_keep, idx_mask):
-        batch_size = x_encoded.shape[0]
-        x_decode = self.decoder.embed(x_encoded)
-        x_masked = utils.repeat_token(
-            self.decoder.mask_token, (batch_size, self.sequence_length)
-        )
-        x_masked = utils.set_at_index(x_masked, idx_keep, x_decode.type_as(x_masked))
-        x_decoded = self.decoder.decode(x_masked)
-        x_pred = utils.get_at_index(x_decoded, idx_mask)
-        x_pred = self.decoder.predict(x_pred)
-        return x_pred
-
-    def forward_decoder_momentum(self, x_encoded, idx_keep, idx_mask):
-        batch_size = x_encoded.shape[0]
-        x_decode = self.decoder_momentum.embed(x_encoded)
-        x_masked = utils.repeat_token(
-            self.decoder.mask_token, (batch_size, self.sequence_length)
-        )
-        x_masked = utils.set_at_index(x_masked, idx_keep, x_decode.type_as(x_masked))
-        x_decoded = self.decoder_momentum.decode(x_masked)
-        x_pred = utils.get_at_index(x_decoded, idx_mask)
-        x_pred = self.decoder_momentum.predict(x_pred)
-        return x_pred
-
     def forward(self, images, reconstruction=False, hair_region_idx=None, extract_features=True):
         if reconstruction:
             batch_size = images.shape[0]
@@ -773,25 +749,15 @@ class OriginSimCLR(nn.Module):
         
         self.projection_head = SimCLRProjectionHead(proj_input_dim, proj_input_dim, output_dim)
         
-        if self.attn_pooling and "vit" in str(model):
-            self.pooled = AttentionPooling(proj_input_dim)
-        elif self.attn_pooling:
-            print("Warning: Attention pooling only for ViT")
 
     def forward(self, x):
         x = self.backbone(x)  # ResNet: [batch, features, 1, 1]; ViT: [batch, seq_len, dim]
         
         if "vit" in str(self.model):
-            if self.attn_pooling:
-                cls_token = x[:, 0, :]
-                patch_token = self.pooled(x)  # [batch, dim]
-                z = self.projection_head(cls_token)
-            else:
-                cls_token = x[:, 0, :]  # CLS token [batch, dim]
-                patch_token = x[:, 1:, :]
-                z = self.projection_head(cls_token)
+            cls_token = x[:, 0, :]  # CLS token [batch, dim]
+            patch_token = x[:, 1:, :]
+            z = self.projection_head(cls_token)
             return z, patch_token
-            
         else:
             x = x.flatten(start_dim=1)  # For CNN like ResNet [batch, features]
             z = self.projection_head(x)

@@ -7,7 +7,7 @@ from utils.transform import get_test_transform, get_train_transform, TwoCropTran
 from utils.dataloader import CustomDataset
 import torch
 from torch.utils.data import DataLoader
-from src.backbone import SupConResNet, SimCLR, MAE, DINOv2, SimMIM, SimCLR_Our
+from src.backbone import SupConResNet, SimCLR, MAE, DINOv2, SimMIM, OriginSimCLR
 from utils.transform import DataAugmentationForSIMWithMask
 import torch
 import torchvision
@@ -138,10 +138,11 @@ def main(args):
             backbone = nn.Sequential(*list(backbone.children())[:-1])
         elif args.model == 'vit_b_16':
             #backbone = torchvision.models.vit_b_16()
-            backbone= vit_base_patch16_224()
-            output_dim= 512
+            # backbone= vit_base_patch16_224()
+            # output_dim= 51
+            backbone=None
         #backbone = nn.Sequential(*list(backbone.children())[:-1])
-        model = SimCLR_Our(backbone)
+        model = OriginSimCLR(backbone, model="vit")
         
         #checkpoint_path = "/mnt/mmlab2024nas/thanhnd_student/QuocAnh/FCIR/Baselines/Composed-Image-Retrieval/experiments/HairPretraining/output_dir/test_method/model_ckpt_179.pth"   # file chỉ chứa model.state_dict()
         #state_dict = torch.load(checkpoint_path, map_location=args.device)
