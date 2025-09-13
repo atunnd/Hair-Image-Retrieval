@@ -85,12 +85,12 @@ class AttentionPooling(nn.Module):
 
 # Custom ViT backbone with SVF integrated
 class ViTBackbone(nn.Module):
-    def __init__(self, vit_model, k=50):  # k for top-k in SVF
+    def __init__(self, vit_model, k=100):  # k for top-k in SVF
         super().__init__()
         self.conv_proj = vit_model.conv_proj
         self.class_token = vit_model.class_token
         self.pos_embed = vit_model.encoder.pos_embedding
-        self.dropout = vit_model.dropout
+        self.dropout = vit_model.encoder.dropout
         self.encoder_layers = vit_model.encoder.layers  # List of transformer layers
         self.final_ln = vit_model.encoder.ln  # Final LayerNorm
         self.num_layers = len(self.encoder_layers)
@@ -111,7 +111,7 @@ class ViTBackbone(nn.Module):
         x = x + self.pos_embed
         
         # Dropout
-        # x = self.dropout(x)
+        x = self.dropout(x)
         
         # Apply encoder layers up to penultimate
         for i in range(self.num_layers - 1):
@@ -121,7 +121,7 @@ class ViTBackbone(nn.Module):
         penultimate_layer = self.encoder_layers[-2]
         # To get attn_weights, call self-attn (assuming standard ViT layer with self_attention)
         self_attn = penultimate_layer.self_attention  # Adjust if layer structure differs
-        _, attn_weights = self_attn(x, x, x, need_weights=True, average_attn_weights=False)  # attn_weights [batch, num_heads, seq_len, seq_len]
+        attn_output, attn_weights = self_attn(query=x, key=x, value=x, need_weights=True, average_attn_weights=False)  # attn_weights [batch, num_heads, seq_len, seq_len]
         
         # Extract CLS attention to patches: A [batch, num_heads, num_patches]
         A = attn_weights[:, :, 0, 1:]  # CLS query to patches
@@ -139,20 +139,32 @@ class ViTBackbone(nn.Module):
         # Top-k indices based on O
         _, top_indices = O.topk(self.k, dim=1, sorted=False)  # [batch, k]
         
+        top_indices = top_indices.long()  # Ensure dtype for gather
+        
         # Gather top-k patches
-        top_patches = torch.gather(patches, 1, top_indices.unsqueeze(-1).expand(-1, -1, self.hidden_dim))  # [batch, k, dim]
+        top_patches = torch.gather(patches, 1, 
+                                  top_indices.unsqueeze(-1).expand(-1, -1, self.hidden_dim))  # [batch, k, 768]
+        
+        # Gather positional embeddings for top-k patches
+        cls_pos = self.pos_embed[:, :1, :]  # [1, 1, 768]
+        # Fix: Expand pos_embed để match batch size trước khi gather
+        pos_embed_expanded = self.pos_embed.expand(x.shape[0], -1, -1)[:, 1:, :]  # [batch, 196, 768]
+        top_pos = torch.gather(pos_embed_expanded, 1, 
+                              top_indices.unsqueeze(-1).expand(-1, -1, self.hidden_dim))  # [batch, k, 768]
+        input_last_layer_pos = torch.cat([cls_pos.expand(x.shape[0], -1, -1), top_pos], dim=1)  # [batch, 1+k, 768]
         
         # New sequence for last layer: CLS + top-k patches
-        cls_token = x[:, 0, :].unsqueeze(1)  # [batch, 1, dim]
-        input_last_layer = torch.cat([cls_token, top_patches], dim=1)  # [batch, 1+k, dim]
+        cls_token = x[:, 0, :].unsqueeze(1)  # [batch, 1, 768]
+        input_last_layer = torch.cat([cls_token, top_patches], dim=1)  # [batch, 1+k, 768]
+        input_last_layer = input_last_layer + input_last_layer_pos  # Add pos_embed
         
         # Apply last layer
-        x = self.encoder_layers[-1](input_last_layer)
+        x = self.encoder_layers[-1](input_last_layer)  # [batch, 1+k, 768]
         
         # Final LN
         x = self.final_ln(x)
         
-        return x  # [batch, 1+k, dim]
+        return x  # [batch, 1+k, 768]
 
 class SimCLR(nn.Module):
     def __init__(self, backbone, model=None, attention_pooling=False, k=50, fusion_type='transformer'):
@@ -767,14 +779,6 @@ class OriginSimCLR(nn.Module):
         features = self.backbone(x)  # ResNet: [batch, features, 1, 1]; ViT: [batch, seq_len, dim]
         
         if "vit" in str(self.model):
-            # if self.attn_pooling:
-            #     # Use pooled if enabled
-            #     pooled = self.pooled(features)  # [batch, dim]
-            #     cls_token = features[:, 0, :] 
-            #     embedding = torch.cat([cls_token, pooled], dim=1)
-            # else:
-            #     # Default to CLS token
-            #     embedding = features[:, 0, :]  # [batch, dim]
             embedding = features[:, 0, :]
         else:
             embedding = features.flatten(start_dim=1)  # [batch, features] for ResNet-like

@@ -3,8 +3,8 @@
 
 python mainpretrain.py \
   --epochs 300 \
-  --batch_size 256 \
-  --device cuda:6 \
+  --batch_size 128 \
+  --device cuda \
   --device_id 2 \
   --save_path output_dir \
   --size 224 \

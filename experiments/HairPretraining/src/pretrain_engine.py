@@ -333,7 +333,7 @@ class Trainer:
                 images1 = images1.to(self.device)
                 #images2 = images2.to(self.device)
 
-                hair_region_idx0, hair_region_idx1, hair_region_idx2 = hair_region_idx[0], hair_region_idx[1], hair_region_idx[2]
+                #hair_region_idx0, hair_region_idx1, hair_region_idx2 = hair_region_idx[0], hair_region_idx[1], hair_region_idx[2]
                 # hair_region_idx0 = hair_region_idx0.to(self.device)
                 # hair_region_idx1 = hair_region_idx1.to(self.device)
                 # hair_region_idx2 = hair_region_idx2.to(self.device)
@@ -365,14 +365,15 @@ class Trainer:
                 #     print("neg sample: ", neg_batch.shape, neg_batch.min(), neg_batch.max()) # [32, 512]
                 # else:
                 anchor_batch, anchor_batch_patch = self.model(images0)
-                pos_samples = positive_transform(images1)
+                #pos_samples = positive_transform(images1)
+                pos_samples = images1
                 pos_batch, pos_batch_patch = self.model(pos_samples)
+                neg_batch, neg_batch_patch = self.model(negative_samples)
+                masked_pos_samples= self.positive_masking_transform(pos_samples)
                 with torch.no_grad():
-                    neg_batch, neg_batch_patch = self.model(negative_samples)
-                    masked_pos_samples= self.positive_masking_transform(pos_samples)
                     masked_pos_batch, masked_pos_batch_patch = self.model(masked_pos_samples)
-                    masked_pos_batch = masked_pos_batch.detach()
                     masked_pos_batch_patch = masked_pos_batch_patch.detach()
+                    
 
                 # if masked_pos_batch_patch is not None:
                 #     masked_pos_batch_patch = masked_pos_batch_patch.detach()
@@ -446,10 +447,10 @@ class Trainer:
 
         if self.neg_loss == "simclr":
             with open(self.log_file, 'a') as f:
-                f.write(f"Epoch {epoch}: Total Loss = {running_loss/len(self.train_loader):.4f}, NT-Xent Loss = {running_loss2/len(self.train_loader):.4f}, MSE Loss = {running_loss3/len(self.train_loader):.4f}, Triplet Loss = {running_loss1/len(self.train_loader):.4f}, Alpha = {alpha:.4f}, Pos distance: {running_post_dist/len(self.train_loader)}, Neg distance: {running_neg_dist/len(self.train_loader)}, Margin violations: {running_margin_violations/len(self.train_loader)}\n")
+                f.write(f"Epoch {epoch}: Total Loss = {running_loss/len(self.train_loader):.4f}, NT-Xent Loss = {running_loss2/len(self.train_loader):.8f}, MSE Loss = {running_loss3/len(self.train_loader):.8f}, Triplet Loss = {running_loss1/len(self.train_loader):.8f}, Alpha = {alpha:.4f}, Pos distance: {running_post_dist/len(self.train_loader)}, Neg distance: {running_neg_dist/len(self.train_loader)}, Margin violations: {running_margin_violations/len(self.train_loader)}\n")
         elif self.neg_loss == "mae":
             with open(self.log_file, 'a') as f:
-                f.write(f"Epoch {epoch}: Total Loss = {running_loss/len(self.train_loader):.4f}, MAE Loss = {running_loss2/len(self.train_loader):.4f}, Triplet Loss = {running_loss1/len(self.train_loader):.4f}, Alpha = {alpha:.4f}, Pos distance: {running_post_dist/len(self.train_loader)}, Neg distance: {running_neg_dist/len(self.train_loader)}, Margin violations: {running_margin_violations/len(self.train_loader)} \n")
+                f.write(f"Epoch {epoch}: Total Loss = {running_loss/len(self.train_loader):.4f}, MAE Loss = {running_loss2/len(self.train_loader):.8f}, Triplet Loss = {running_loss1/len(self.train_loader):.4f}, Alpha = {alpha:.4f}, Pos distance: {running_post_dist/len(self.train_loader)}, Neg distance: {running_neg_dist/len(self.train_loader)}, Margin violations: {running_margin_violations/len(self.train_loader)} \n")
 
         return running_loss/len(self.train_loader),running_loss1/len(self.train_loader), running_loss2/len(self.train_loader), neg_batch
     
