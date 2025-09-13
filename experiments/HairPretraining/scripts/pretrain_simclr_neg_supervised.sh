@@ -4,7 +4,7 @@
 python mainpretrain.py \
   --epochs 300 \
   --batch_size 128 \
-  --device cuda \
+  --device cuda:6 \
   --device_id 2 \
   --save_path output_dir \
   --size 224 \

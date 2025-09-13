@@ -365,8 +365,8 @@ class Trainer:
                 #     print("neg sample: ", neg_batch.shape, neg_batch.min(), neg_batch.max()) # [32, 512]
                 # else:
                 anchor_batch, anchor_batch_patch = self.model(images0)
-                #pos_samples = positive_transform(images1)
-                pos_samples = images1
+                pos_samples = positive_transform(images1)
+                #pos_samples = images1
                 pos_batch, pos_batch_patch = self.model(pos_samples)
                 neg_batch, neg_batch_patch = self.model(negative_samples)
                 masked_pos_samples= self.positive_masking_transform(pos_samples)
@@ -402,7 +402,7 @@ class Trainer:
                 running_margin_violations += violations.sum().item()
 
             with torch.cuda.amp.autocast():
-                trip_loss = self.triplet_loss_stage2(anchor_batch, pos_batch, neg_batch)
+                trip_loss = self.triplet_loss_stage2(anchor_batch_patch, pos_batch_patch, neg_batch_patch)
                 beta = 0.2
 
                 #trip_loss = triplet_loss(anchor_batch, pos_batch, neg_batch)

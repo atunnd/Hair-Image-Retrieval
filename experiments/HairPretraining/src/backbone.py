@@ -164,7 +164,7 @@ class ViTBackbone(nn.Module):
         # Final LN
         x = self.final_ln(x)
         
-        return x  # [batch, 1+k, 768]
+        return x, top_patches  # [batch, 1+k, 768]
 
 class SimCLR(nn.Module):
     def __init__(self, backbone, model=None, attention_pooling=False, k=50, fusion_type='transformer'):
@@ -763,17 +763,18 @@ class OriginSimCLR(nn.Module):
         
 
     def forward(self, x):
-        x = self.backbone(x)  # ResNet: [batch, features, 1, 1]; ViT: [batch, seq_len, dim]
+         # ResNet: [batch, features, 1, 1]; ViT: [batch, seq_len, dim]
         
         if "vit" in str(self.model):
+            x, top_patches = self.backbone(x) 
             cls_token = x[:, 0, :]  # CLS token [batch, dim]
-            patch_token = x[:, 1:, :]
             z = self.projection_head(cls_token)
-            return z, patch_token
+            return z, top_patches
         else:
+            x = self.backbone(x) 
             x = x.flatten(start_dim=1)  # For CNN like ResNet [batch, features]
             z = self.projection_head(x)
-        return z, None
+            return z, None
     
     def extract_features(self, x):
         features = self.backbone(x)  # ResNet: [batch, features, 1, 1]; ViT: [batch, seq_len, dim]
