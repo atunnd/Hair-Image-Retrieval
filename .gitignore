@@ -21,6 +21,7 @@ __pycache__/
 /experiments/HairPretraining/dino
 /experiments/HairPretraining/dinov3
 /experiments/HairPretraining/weights
+/Siamese-Image-Modeling
 
 # Model files
 *.pt

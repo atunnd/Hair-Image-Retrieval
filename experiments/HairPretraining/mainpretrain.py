@@ -142,7 +142,7 @@ def main(args):
             # output_dim= 51
             backbone=None
         #backbone = nn.Sequential(*list(backbone.children())[:-1])
-        model = OriginSimCLR(backbone, model="vit")
+        model = OriginSimCLR(backbone, model=args.model)
         
         #checkpoint_path = "/mnt/mmlab2024nas/thanhnd_student/QuocAnh/FCIR/Baselines/Composed-Image-Retrieval/experiments/HairPretraining/output_dir/test_method/model_ckpt_179.pth"   # file chỉ chứa model.state_dict()
         #state_dict = torch.load(checkpoint_path, map_location=args.device)

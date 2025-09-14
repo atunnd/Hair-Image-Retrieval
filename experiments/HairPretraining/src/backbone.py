@@ -774,7 +774,7 @@ class OriginSimCLR(nn.Module):
             x = self.backbone(x) 
             x = x.flatten(start_dim=1)  # For CNN like ResNet [batch, features]
             z = self.projection_head(x)
-            return z, None
+            return z
     
     def extract_features(self, x):
         features = self.backbone(x)  # ResNet: [batch, features, 1, 1]; ViT: [batch, seq_len, dim]
