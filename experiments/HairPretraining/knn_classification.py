@@ -117,22 +117,7 @@ def main(args):
     if args.mode == "simclr_supcon":
         model = SupConResNet(name=args.model, feat_dim=args.classes)
     elif args.mode == "simclr":
-        if args.model == "resnet18":
-            backbone = torchvision.models.resnet18()
-            output_dim=128
-            backbone = nn.Sequential(*list(backbone.children())[:-1])
-        elif args.model == "resnet50":
-            backbone = torchvision.models.resnet50()
-            output_dim=1024
-            backbone = nn.Sequential(*list(backbone.children())[:-1])
-        elif args.model == 'vit_b_16':
-            backbone=None
-            output_dim= 512
-
-        if "vit" in str(args.model):
-            model = SimCLR(backbone, args.model, attention_pooling = False)
-        else:
-            model = OriginSimCLR(backbone, args.model, attention_pooling = False)
+        model = OriginSimCLR(model=args.model)
 
     elif args.mode == "mae":
         vit = vit_base_patch16_224()

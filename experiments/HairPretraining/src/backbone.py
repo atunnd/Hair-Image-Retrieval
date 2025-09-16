@@ -69,6 +69,15 @@ from torchvision import models
 
 # Giả sử SimCLRProjectionHead (nếu dùng lightly, import; đây là placeholder)
 
+from lightly.models.utils import (
+    batch_shuffle,
+    batch_unshuffle,
+    deactivate_requires_grad,
+    update_momentum,
+)
+
+import torchvision
+
 
 class AttentionPooling(nn.Module):
     def __init__(self, dim):
@@ -786,10 +795,19 @@ class SimMIM(nn.Module):
         
 #         return embedding  # Always [batch, dim] raw from backbone
 
+from lightly.models.utils import (
+    batch_shuffle,
+    batch_unshuffle,
+    deactivate_requires_grad,
+    update_momentum,
+)
+
 class OriginSimCLR(nn.Module):
-    def __init__(self, backbone, model=None):
+    def __init__(self, backbone=None, model=None):
         super().__init__()
         self.model = model
+        self.backbone=None
+        print("Using backbone: ", self.model)
         
         # Handle backbone: For ViT, wrap it
         if "vit" in str(model):
@@ -798,11 +816,14 @@ class OriginSimCLR(nn.Module):
             proj_input_dim = 768  # For vit_b_16
             output_dim = 512
         else:
-            self.backbone = backbone  # Assume ResNet-like, already Sequential[:-1]
             if model == "resnet18":
+                backbone = torchvision.models.resnet18()
+                self.backbone = nn.Sequential(*list(backbone.children())[:-1])
                 proj_input_dim = 512
                 output_dim=128
             elif model == "resnet50":
+                backbone = torchvision.models.resnet50()
+                self.backbone = nn.Sequential(*list(backbone.children())[:-1])
                 proj_input_dim = 2048
                 output_dim=1024
             else:
@@ -810,24 +831,39 @@ class OriginSimCLR(nn.Module):
         
         self.projection_head = SimCLRProjectionHead(proj_input_dim, proj_input_dim, output_dim)
 
+        #EMA backbone and projection head
+        # self.backbone_momentum = copy.deepcopy(self.backbone)
+        # self.projection_head_momentum = copy.deepcopy(self.projection_head)
+        # deactivate_requires_grad(self.backbone_momentum)
+        # deactivate_requires_grad(self.projection_head_momentum)
+
     def forward(self, x):
         x = self.backbone(x)  # ResNet: [batch, features, 1, 1]; ViT: [batch, seq_len, dim]
         
         if "vit" in str(self.model):
-            if self.attn_pooling:
-                cls_token = x[:, 0, :]
-                patch_token = self.pooled(x)  # [batch, dim]
-                z = self.projection_head(cls_token)
-            else:
-                cls_token = x[:, 0, :]  # CLS token [batch, dim]
-                patch_token = x[:, 1:, :]
-                z = self.projection_head(cls_token)
+            cls_token = x[:, 0, :]  # CLS token [batch, dim]
+            patch_token = x[:, 1:, :]
+            z = self.projection_head(cls_token)
             return z, patch_token
-            
         else:
             x = x.flatten(start_dim=1)  # For CNN like ResNet [batch, features]
             z = self.projection_head(x)
             return z, None
+    
+    # def forward_momentum(self, x):
+    #     x = self.backbone_momentum(x)  # ResNet: [batch, features, 1, 1]; ViT: [batch, seq_len, dim]
+        
+    #     if "vit" in str(self.model):
+    #         cls_token = x[:, 0, :]  # CLS token [batch, dim]
+    #         patch_token = x[:, 1:, :]
+    #         z = self.projection_head_momentum(cls_token)
+    #         return z, patch_token
+            
+    #     else:
+    #         x = x.flatten(start_dim=1)  # For CNN like ResNet [batch, features]
+    #         z = self.projection_head_momentum(x)
+    #         return z, None
+    
     
     def extract_features(self, x):
         x = self.backbone(x).flatten(start_dim=1)
@@ -934,14 +970,14 @@ class DINOv2(Module):
     def forward(self, x: Tensor) -> Tensor:
         return self.teacher_backbone(x)
 
-    def forward_teacher(self, x: Tensor) -> tuple[Tensor, Tensor]:
+    def forward_teacher(self, x: Tensor):
         features = self.teacher_backbone.encode(x)
         cls_tokens = features[:, 0]
         return cls_tokens, features
 
     def forward_student(
-        self, x: Tensor, mask: Tensor | None
-    ) -> tuple[Tensor, Tensor | None]:
+        self, x: Tensor, mask: Tensor 
+    ):
         features = self.student_backbone.encode(x, mask=mask)
         cls_tokens = features[:, 0]
         masked_features = None if mask is None else features[mask]

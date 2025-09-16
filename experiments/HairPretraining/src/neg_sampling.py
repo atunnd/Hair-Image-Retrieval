@@ -148,13 +148,13 @@ def NegSamplerNN(batch: torch.Tensor, k: int, metric: str):
     backbone = nn.Sequential(*list(resnet.children())[:-1])
     model = OriginSimCLR(backbone, model="resnet18").to(device)
     #model = SimCLR(backbone).to(device)
-    checkpoint_path = "output_dir/simclr_60k/cpkt_450.pth"
+    checkpoint_path = "/mnt/mmlab2024nas/thanhnd_student/QuocAnh/FCIR/Baselines/Composed-Image-Retrieval/hair_representation/lightly/output_dir/simclr_60k/cpkt_450.pth"
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))
     model.eval()
 
     # create embeddings
     with torch.no_grad():
-        embeddings = model(batch)
+        embeddings, _ = model(batch)
 
     B, D = embeddings.shape
     
@@ -180,13 +180,45 @@ def NegSamplerNN(batch: torch.Tensor, k: int, metric: str):
     
     return kth_indices
 
+# def NegSamplerStatic(model, batch, metric="cosine", k=7):
+#     # load simclr checkpoint
+#     model.eval()
+
+#     # create embeddings
+#     with torch.no_grad():
+#         embeddings, _ = model(batch)
+
+#     B, D = embeddings.shape
+    
+#     if metric == 'cosine':
+#         # Normalize embeddings for cosine similarity
+#         embeddings_norm = embeddings / torch.norm(embeddings, dim=1, keepdim=True).clamp(min=1e-8)
+#         # Similarity matrix: (B, B)
+#         sim_matrix = torch.mm(embeddings_norm, embeddings_norm.t())
+#     elif metric == 'euclidean':
+#         # Use negative distances as similarity (higher is better)
+#         dist_matrix = torch.cdist(embeddings, embeddings)
+#         sim_matrix = -dist_matrix
+#     else:
+#         raise ValueError("Unsupported metric. Choose 'cosine' or 'euclidean'.")
+    
+#     # Sort similarities descending and get indices
+#     sorted_sim, sorted_indices = torch.sort(sim_matrix, dim=1, descending=True)
+    
+#     # Return the k-th index (adjust for 0-based indexing)
+#     if k < 1 or k > B:
+#         raise ValueError(f"k must be between 1 and {B}")
+#     kth_indices = sorted_indices[:, k-1]
+    
+#     return kth_indices
+import torch
+import torch.nn.functional as F
+
 def NegSamplerStatic(model, batch, metric="cosine", k=7):
-    # load simclr checkpoint
     model.eval()
 
     # create embeddings
-    with torch.no_grad():
-        embeddings, _ = model(batch)
+    embeddings, _ = model.forward_momentum(batch)
 
     B, D = embeddings.shape
     

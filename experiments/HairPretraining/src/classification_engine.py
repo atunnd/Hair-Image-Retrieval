@@ -33,7 +33,7 @@ class Classifier:
 
         with torch.no_grad():
             for batch in tqdm(self.train_loader, desc="Extracting training features"):
-                images, labels = batch[0], batch[2]
+                images, labels = batch[0], batch[1]
                 x0= images[0]
                 x0 = x0.to(self.device)
                 training_features = self.model.extract_features(x0)
@@ -43,7 +43,7 @@ class Classifier:
 
         with torch.no_grad():
             for batch in tqdm(self.test_loader, desc="Extracting testing features"):
-                images, labels = batch[0], batch[2]
+                images, labels = batch[0], batch[1]
                 x0 = images[0]
                 x0 = x0.to(self.device)
                 testing_features = self.model.extract_features(x0)

@@ -59,12 +59,12 @@ def parse_args():
     parser.add_argument('--warm_up_epochs', default=0, type=int, help='Number of warmup epochs for negative sampling')
     parser.add_argument('--neg_loss', type=str, default="simclr", choices=['simclr', 'supcon', 'mae'], help="loss for negative sampling")
     parser.add_argument('--sampling_frequency', type=int, default=0, help="Frequency to sample hard negative")
+    parser.add_argument('--ema', type=float, default=0.99)
     # supcon setting
     parser.add_argument('--classes', default=128, type=int, help="Classes for sup con")
 
     # ViT settings
     parser.add_argument('--atn_pooling', default=False, type=bool, help='attention pooling for constrative learning')
-    parser.add_argument('--fusion_type', default="mlp", type=str, choices=["mlp", "transformer"])
 
     # augmentation settings
     parser.add_argument('--crop_min', default=0.2, type=float, help="crop min for random crop")
@@ -113,46 +113,18 @@ def main(args):
     else:
         train_dataset = CustomDataset(annotations_file=args.train_annotation, img_dir=args.img_dir, transform=train_transform)
 
-    #test_dataset = CustomDataset(annotations_file=args.test_annotation, img_dir=args.img_dir, transform=test_transform)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, 
-                              shuffle=True, num_workers = args.num_workers)
-    # test_loader = DataLoader(test_dataset, batch_size=args.batch_size, 
-    #                          shuffle=True, num_workers = args.num_workers)
+                              shuffle=True, num_workers = args.num_workers, drop_last=True)
     
     if args.mode == "simclr_supcon":
         model = SupConResNet(name=args.model, feat_dim=args.classes)
     elif args.mode == "simclr":
-        if args.model == "resnet18":
-            backbone = torchvision.models.resnet18()
-            output_dim=128
-            backbone = nn.Sequential(*list(backbone.children())[:-1])
-        elif args.model == "resnet50":
-            backbone = torchvision.models.resnet50()
-            output_dim=1024
-            backbone = nn.Sequential(*list(backbone.children())[:-1])
-        elif args.model == 'vit_b_16':
-            #backbone = torchvision.models.vit_b_16()
-            # backbone= vit_base_patch16_224()
-            # output_dim= 51
-            backbone=None
-        #backbone = nn.Sequential(*list(backbone.children())[:-1])
-        model = OriginSimCLR(backbone, model=args.model)
-        
-        #checkpoint_path = "/mnt/mmlab2024nas/thanhnd_student/QuocAnh/FCIR/Baselines/Composed-Image-Retrieval/experiments/HairPretraining/output_dir/test_method/model_ckpt_179.pth"   # file chỉ chứa model.state_dict()
-        #state_dict = torch.load(checkpoint_path, map_location=args.device)
-        #model.load_state_dict(state_dict)
-        #print("✅ Model weights loaded!")
-
+        model = OriginSimCLR(model=args.model)
     elif args.mode == "mae":
         vit = vit_base_patch16_224()
-        model = MAE(vit)
-    
+        model = MAE(vit) 
     elif args.mode == "dinov2":
-        #backbone = torch.hub.load('facebookresearch/dino:main', 'dino_vits16', pretrained=False, source="github")
-        #backbone = vits.vit_base(patch_size=16)
-        #input_dim = backbone.embed_dim
         model = DINOv2()
-
     elif args.mode == "simMIM":
         vit = torchvision.models.vit_b_16(pretrained=False)
         model = SimMIM(vit)

@@ -207,10 +207,10 @@ class DINOLoss(Module):
 
     def forward(
         self,
-        teacher_out: list[Tensor],
-        student_out: list[Tensor],
-        teacher_temp: Optional[float] = None,
-        epoch: Optional[int] = None,
+        teacher_out,
+        student_out,
+        teacher_temp= None,
+        epoch = None,
     ) -> Tensor:
         """Cross-entropy between softmax outputs of the teacher and student networks.
 
