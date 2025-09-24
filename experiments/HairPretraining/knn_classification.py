@@ -4,11 +4,11 @@ from src.classification_engine import Classifier
 from utils.utils import set_seed
 import yaml
 import os
-from utils.transform import get_test_transform, get_train_transform, TwoCropTransform
+from utils.transform import get_test_transform, get_train_transform, TwoCropTransform, get_siaMIM_transform
 from utils.dataloader import CustomDataset
 import torch
 from torch.utils.data import DataLoader
-from src.backbone import SupConResNet, SimCLR, MAE, DINO, SimMIM, OriginSimCLR
+from src.backbone import SupConResNet, SimCLR, MAE, DINOv2, SimMIM, OriginSimCLR, ViTFeatureExtractor
 import torch
 import torchvision
 from torch import nn
@@ -32,6 +32,7 @@ from sklearn.metrics import (
     confusion_matrix, classification_report, roc_auc_score,
     log_loss
 )
+from utils import models_vit
 
 
 def parse_args():
@@ -46,7 +47,7 @@ def parse_args():
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
 
     # Model option
-    parser.add_argument('--mode', type=str, default='simclr_supcon', choices=['mae', 'simclr', 'simclr_supcon', 'dino', 'simMIM'])
+    parser.add_argument('--mode', type=str, default='simclr_supcon', choices=['mae', 'simclr', 'simclr_supcon', 'dinov2', 'simMIM', 'siaMIM', "our"])
     parser.add_argument('--model', type=str, default='resnet18', choices = ['resnet18', 'resnet50', "vit_b_16"])
     parser.add_argument('--checkpoint_path', type=str, default=None)
     parser.add_argument('--device', type=str, default='cuda', help='Device to use: cuda or cpu')
@@ -81,27 +82,21 @@ def main(args):
         std = (0.2675, 0.2565, 0.2761)
         train_transform = get_train_transform(args.size, mean, std)
         test_transform = get_test_transform(args.size, mean, std)
-    elif args.mode == "simclr":
-        if "vit" in args.model:
-            print("vit transformation")
-            aug_args = type('', (), {})()
-            aug_args.input_size = args.size
-            aug_args.crop_min = args.crop_min
-            aug = DataAugmentationForSIMWithMask(aug_args)
-            train_transform = aug
-            test_transform = aug
-        else:
-            train_transform = SimCLRTransform(input_size=224)
-            test_transform = SimCLRTransform(input_size=224)   
+    elif args.mode == "simclr" or args.mode=="our":
+        train_transform = SimCLRTransform(input_size=224)
+        test_transform = SimCLRTransform(input_size=224)   
     elif args.mode == "mae":
         train_transform = MAETransform(input_size=224)
         test_transform = MAETransform(input_size=224)
-    elif args.mode == "dino":
+    elif args.mode == "dinov2":
         train_transform = DINOTransform()
         test_transform = DINOTransform()
     elif args.mode == "simMIM":
         train_transform = MAETransform(input_size=224)
         test_transform = MAETransform(input_size=224)
+    elif args.mode == "siaMIM":
+        train_transform = get_siaMIM_transform()
+        test_transform = get_siaMIM_transform()
 
     if args.mode == "simclr_supcon":
         train_dataset = CustomDataset(args.train_annotation, args.img_dir, TwoCropTransform(train_transform))
@@ -116,26 +111,65 @@ def main(args):
     
     if args.mode == "simclr_supcon":
         model = SupConResNet(name=args.model, feat_dim=args.classes)
+        state_dict = torch.load(args.checkpoint_path, map_location=args.device)
+        model.load_state_dict(state_dict)
+        print("✅ Model weights loaded!")
+
     elif args.mode == "simclr":
+        model = SimCLR(model=args.model)
+        state_dict = torch.load(args.checkpoint_path, map_location=args.device)
+        model.load_state_dict(state_dict)
+        print("✅ Model weights loaded!")
+    
+    elif args.mode == "our":
         model = OriginSimCLR(model=args.model)
+        state_dict = torch.load(args.checkpoint_path, map_location=args.device)
+        model.load_state_dict(state_dict)
+        print("✅ Model weights loaded!")
 
     elif args.mode == "mae":
         vit = vit_base_patch16_224()
         model = MAE(vit)
+        state_dict = torch.load(args.checkpoint_path, map_location=args.device)
+        model.load_state_dict(state_dict)
+        print("✅ Model weights loaded!")
     
-    # elif args.mode == "dino":
-    #     #backbone = torch.hub.load('facebookresearch/dino:main', 'dino_vits16', pretrained=False, source="github")
-    #     backbone = vits.vit_base(patch_size=16)
-    #     input_dim = backbone.embed_dim
-    #     model = DINO(backbone, input_dim)
+    elif args.mode == "dinov2":
+        model = DINOv2()
+        state_dict = torch.load(args.checkpoint_path, map_location=args.device)
+        model.load_state_dict(state_dict)
+        print("✅ Model weights loaded!")
 
     elif args.mode == "simMIM":
         vit = torchvision.models.vit_b_16(pretrained=False)
         model = SimMIM(vit)
+        state_dict = torch.load(args.checkpoint_path, map_location=args.device)
+        model.load_state_dict(state_dict)
+        print("✅ Model weights loaded!")
+        
     
-    state_dict = torch.load(args.checkpoint_path, map_location=args.device)
-    model.load_state_dict(state_dict)
-    print("✅ Model weights loaded!")
+    elif args.mode == "siaMIM":
+        model = "vit_base_patch16"
+
+        # Build model
+        vit_model = models_vit.__dict__[model](
+            drop_path_rate=0.0,
+            global_pool=True,
+            init_values=None
+        )
+
+        checkpoint = torch.load(args.checkpoint_path, map_location=args.device, weights_only=False)
+        checkpoint_model = checkpoint['model']
+        state_dict = vit_model.state_dict()
+        for k in ["head.weight", "head.bias"]:
+            if k in checkpoint_model and k in state_dict and checkpoint_model[k].shape != state_dict[k].shape:
+                print(f"Removing key {k} from pretrained checkpoint")
+                del checkpoint_model[k]
+
+        msg = vit_model.load_state_dict(checkpoint_model)
+        print("Model loading message:", msg)
+        
+        model = ViTFeatureExtractor(vit_model.to(args.device))
 
     trainer = Classifier(model, train_loader, test_loader, args)
     trainer.train()

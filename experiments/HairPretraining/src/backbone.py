@@ -175,28 +175,32 @@ class ViTBackbone(nn.Module):
         
         return x, top_patches  # [batch, 1+k, 768]
 
+
+import torch
+import torch.nn as nn
+import copy
+
 class SimCLR(nn.Module):
-    def __init__(self, backbone, model=None, attention_pooling=False, k=50, fusion_type='transformer'):
+    def __init__(self, model=None):
         super().__init__()
         self.model = model
-        self.attn_pooling = attention_pooling
-        self.k = k  # For SVF
-        self.fusion_type = fusion_type  # 'transformer' as requested
+        print("Using backbone: ", self.model)
         
-        # Handle backbone: For ViT, wrap it with SVF
-        if "vit" in str(self.model):
+        # Handle backbone: For ViT, wrap it
+        if "vit" in str(model):
             vit = models.vit_b_16()  # Load full ViT if backbone is not already wrapped
-            self.backbone = ViTBackbone(vit, k=self.k)
+            self.backbone = ViTBackbone(vit)
             proj_input_dim = 768  # For vit_b_16
             output_dim = 512
-            # Fusion module: Transformer as requested
-            self.fusion_module = nn.TransformerEncoderLayer(d_model=proj_input_dim, nhead=8, batch_first=True)
         else:
-            self.backbone = backbone  # Assume ResNet-like, already Sequential[:-1]
             if model == "resnet18":
+                backbone = torchvision.models.resnet18()
+                self.backbone = nn.Sequential(*list(backbone.children())[:-1])
                 proj_input_dim = 512
                 output_dim=128
             elif model == "resnet50":
+                backbone = torchvision.models.resnet50()
+                self.backbone = nn.Sequential(*list(backbone.children())[:-1])
                 proj_input_dim = 2048
                 output_dim=1024
             else:
@@ -204,188 +208,28 @@ class SimCLR(nn.Module):
         
         self.projection_head = SimCLRProjectionHead(proj_input_dim, proj_input_dim, output_dim)
         
-        if self.attn_pooling and "vit" in str(self.model):
-            self.pooled = AttentionPooling(proj_input_dim)
-        elif self.attn_pooling:
-            print("Warning: Attention pooling only for ViT")
-        
-        self.backbone_momentum = copy.deepcopy(self.backbone)
-        self.projection_head_momentum = copy.deepcopy(self.projection_head)
-        for param in self.backbone_momentum.parameters():
-            param.requires_grad = False
-        for param in self.projection_head_momentum.parameters():
-            param.requires_grad = False
-
-    def _internal_forward(self, backbone, projection_head, x):
-        x = backbone(x)  # [batch, 1+k, dim] after SVF
+    def forward(self, x):
+        x = self.backbone(x)  # ResNet: [batch, features, 1, 1]; ViT: [batch, seq_len, dim]
         
         if "vit" in str(self.model):
-            cls_token = x[:, 0, :]  # [batch, dim]
-            patch_token = x[:, 1:, :]  # Top-k patches [batch, k, dim]
-            
-            # Fusion with transformer (as requested)
-            fused_input = torch.stack([cls_token, patch_token.mean(dim=1)], dim=1)  # [batch, 2, dim] (mean patch as summary for fusion)
-            fused_output = self.fusion_module(fused_input)  # [batch, 2, dim]
-            final_cls = fused_output[:, 0, :]  # [batch, dim]
-            
-            z = projection_head(final_cls)
+            cls_token = x[:, 0, :]  # CLS token [batch, dim]
+            patch_token = x[:, 1:, :]
+            z = self.projection_head(cls_token)
             return z, patch_token
-            
         else:
             x = x.flatten(start_dim=1)  # For CNN like ResNet [batch, features]
-            z = projection_head(x)
-            return z, None
-
-    def forward(self, x):
-        return self._internal_forward(self.backbone, self.projection_head, x)
-
-    def forward_momentum(self, x):
-        return self._internal_forward(self.backbone_momentum, self.projection_head_momentum, x)
+            z = self.projection_head(x)
+        return z, None
     
     def extract_features(self, x):
-        features = self.backbone(x)  # [batch, 1+k, dim] for ViT
+        features = self.backbone(x)  # ResNet: [batch, features, 1, 1]; ViT: [batch, seq_len, dim]
         
         if "vit" in str(self.model):
-            cls_token = features[:, 0, :]
-            patch_token = features[:, 1:, :]
-            fused_input = torch.stack([cls_token, patch_token.mean(dim=1)], dim=1)
-            fused_output = self.fusion_module(fused_input)
-            final_cls = fused_output[:, 0, :]
-            return final_cls  # Fused CLS
+            embedding = features[:, 0, :]
         else:
-            return features.flatten(start_dim=1)
-
-
-import torch
-import torch.nn as nn
-import copy
-
-class SimCLR_Our(nn.Module):
-    def __init__(self, vit, mask=None, max_patches=100):
-        super().__init__()
-        decoder_dim = 512
-        self.mask_ratio = 0.75
-        self.patch_size = vit.patch_embed.patch_size[0]
-
-        self.backbone = MaskedVisionTransformerTIMM(vit=vit)
-        self.sequence_length = self.backbone.sequence_length
-
-        self.decoder = MAEDecoderTIMM(
-            num_patches=vit.patch_embed.num_patches,
-            patch_size=self.patch_size,
-            embed_dim=vit.embed_dim,
-            decoder_embed_dim=decoder_dim,
-            decoder_depth=1,
-            decoder_num_heads=16,
-            mlp_ratio=4.0,
-            proj_drop_rate=0.0,
-            attn_drop_rate=0.0,
-        )
-
-        proj_input_dim = 768  # For vit_b_16
-        output_dim = 512
-        self.projection_head = SimCLRProjectionHead(proj_input_dim, proj_input_dim, output_dim)
-
-        self.backbone_momentum = copy.deepcopy(self.backbone)
-        self.projection_head_momentum = copy.deepcopy(self.projection_head)
-        self.decoder_momentum = copy.deepcopy(self.decoder)
-        for param in self.backbone_momentum.parameters():
-            param.requires_grad = False
-        for param in self.projection_head_momentum.parameters():
-            param.requires_grad = False
-        for param in self.decoder_momentum.parameters():
-            param.requires_grad = False
-
-    def forward_encoder(self, images, idx_keep=None, hair_region_idx=None):
-        if hair_region_idx is not None:
-            return self.backbone.encode(images=images, idx_keep=None, hair_region_idx=None)
-        else:
-            return self.backbone.encode(images=images, idx_keep=idx_keep)
-
-    def forward_encoder_momentum(self, images, idx_keep=None, hair_region_idx=None):
-        if hair_region_idx is not None:
-            return self.backbone_momentum.encode(images=images, idx_keep=None, hair_region_idx=None)
-        else:
-            return self.backbone_momentum.encode(images=images, idx_keep=idx_keep)
-
-    def forward(self, images, reconstruction=False, hair_region_idx=None, extract_features=True):
-        if reconstruction:
-            batch_size = images.shape[0]
-            idx_keep, idx_mask = utils.random_token_mask(
-                size=(batch_size, self.sequence_length),
-                mask_ratio=self.mask_ratio,
-                device=images.device,
-            )
-            x_encoded = self.forward_encoder(images=images, idx_keep=idx_keep)
-            #print(f"x_encoded reconstruction: {x_encoded.shape}\n") #torch.Size([32, 50, 768])
-            x_pred = self.forward_decoder(
-                x_encoded=x_encoded, idx_keep=idx_keep, idx_mask=idx_mask
-            )
-            patches = utils.patchify(images, self.patch_size)
-            target = utils.get_at_index(patches, idx_mask - 1)
-            x_projection = self.projection_head_momentum(x_encoded[:, 0, :])
-            return x_projection, x_pred, target
-        else:
-            x_encoded = self.forward_encoder(images=images, idx_keep=None, hair_region_idx=None)
-            x_projection = self.projection_head(x_encoded[:, 0, :])  # Use CLS token
-            #print(f"x_encoded hair: {x_encoded.shape}\n")
-            return x_projection, None, None
-
-        # batch_size = images.shape[0]
-        # idx_keep, idx_mask = utils.random_token_mask(
-        #     size=(batch_size, self.sequence_length),
-        #     mask_ratio=self.mask_ratio,
-        #     device=images.device,
-        # )
-        # x_encoded = self.forward_encoder(images=images, idx_keep=idx_keep)
-        # #print(f"x_encoded reconstruction: {x_encoded.shape}\n") #torch.Size([32, 50, 768])
-        # x_pred = self.forward_decoder(
-        #     x_encoded=x_encoded, idx_keep=idx_keep, idx_mask=idx_mask
-        # )
-        # patches = utils.patchify(images, self.patch_size)
-        # target = utils.get_at_index(patches, idx_mask - 1)
-
-        # projected_cls_token = self.projection_head(x_encoded[:, 0, :])  # Use CLS token
-        # return projected_cls_token, x_pred, target
-
-    def forward_momentum(self, images, reconstruction=False, hair_region_idx=None, extract_features=True):
-        # batch_size = images.shape[0]
-        # idx_keep, idx_mask = utils.random_token_mask(
-        #     size=(batch_size, self.sequence_length),
-        #     mask_ratio=self.mask_ratio,
-        #     device=images.device,
-        # )
-        # x_encoded = self.forward_encoder_momentum(images=images, idx_keep=idx_keep)
-        # x_pred = self.forward_decoder_momentum(
-        #     x_encoded=x_encoded, idx_keep=idx_keep, idx_mask=idx_mask
-        # )
-        # patches = utils.patchify(images, self.patch_size)
-        # target = utils.get_at_index(patches, idx_mask - 1)
-
-        # projected_cls_token = self.projection_head_momentum(x_encoded[:, 0, :])  # Use CLS token
-        # return projected_cls_token, x_pred, target
-        if reconstruction:
-            batch_size = images.shape[0]
-            idx_keep, idx_mask = utils.random_token_mask(
-                size=(batch_size, self.sequence_length),
-                mask_ratio=self.mask_ratio,
-                device=images.device,
-            )
-            x_encoded = self.forward_encoder_momentum(images=images, idx_keep=idx_keep)
-            #print(f"x_encoded hair momentum: {x_encoded.shape}\n") #torch.Size([32, 50, 768])
-            x_pred = self.forward_decoder_momentum(
-                x_encoded=x_encoded, idx_keep=idx_keep, idx_mask=idx_mask
-            )
-            patches = utils.patchify(images, self.patch_size)
-            target = utils.get_at_index(patches, idx_mask - 1)
-
-            x_projection = self.projection_head_momentum(x_encoded[:, 0, :])
-            return x_projection, x_pred, target
-        else:
-            x_encoded = self.forward_encoder_momentum(images=images, idx_keep=None, hair_region_idx=None)
-            x_projection = self.projection_head_momentum(x_encoded[:, 0, :])  # Use CLS token
-            #print(f"x_encoded hair momentum: {x_encoded.shape}\n") #torch.Size([32, 50, 768])
-            return x_projection, None, None
+            embedding = features.flatten(start_dim=1)  # [batch, features] for ResNet-like
+        
+        return embedding  # Always [batch, dim] raw from backbone
         
 
 class BasicBlock(nn.Module):
@@ -982,6 +826,11 @@ class DINOv2(Module):
         cls_tokens = features[:, 0]
         masked_features = None if mask is None else features[mask]
         return cls_tokens, masked_features
+
+    def extract_features(self, x):
+        features = self.student_backbone(x)
+        cls_tokens = features[:, 0:1]
+        return cls_tokens
 
 class ViTFeatureExtractor:
     def __init__(self, model):
