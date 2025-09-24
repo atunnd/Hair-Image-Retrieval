@@ -4,6 +4,7 @@ import torch.optim as optim
 import numpy as np
 from tqdm import tqdm
 import os
+import math
 
 import lightly
 from lightly.loss import NTXentLoss
@@ -24,6 +25,7 @@ from lightly.models.utils import (
     update_momentum,
 )
 from lightly.utils.scheduler import cosine_schedule, linear_warmup_schedule
+import random
 
 class Trainer:
     def __init__(self, model, train_loader, val_loader, args):
@@ -307,7 +309,7 @@ class Trainer:
         
         return running_loss/len(self.train_loader)
     
-    def train_one_epoch_simclr_neg_sample(self, epoch=0, alpha=0, neg_batch_idx=None, momentum_val=0.99, scaler=None):
+    def train_one_epoch_simclr_neg_sample(self, epoch=0, alpha=0, neg_batch_idx=None, momentum_val=0.99, scaler=None, prev_margin_violations=0):
         self.model.train()
         running_loss = 0.0
         running_loss1 = 0.0
@@ -316,7 +318,7 @@ class Trainer:
         running_post_dist =.0
         running_neg_dist=.0
         running_margin_violations=0
-
+        total_k=0
         for batch_id, batch in enumerate(tqdm(self.train_loader, desc="Training with negative samples")):
             self.optimizer.zero_grad()
             images, hair_region_idx = batch[0], batch[1]
@@ -345,14 +347,23 @@ class Trainer:
                 negative_samples = NegSamplerRandomly(images1)
             ### STAGE 2: Hard negative mining
             else:
-                if (epoch + 1) == self.warm_up_epochs or (epoch+1 - self.warm_up_epochs) % self.sampling_frequency == 0:
+                if (epoch + 1) == self.warm_up_epochs:
                     if batch_id == 0:
                         self.negative_batch_idx = []
-                    self.negative_batch_idx.append(NegSamplerStatic(self.model, images1, k=7)) # negative with momentum model
 
-                print("Len idx: ", len(self.negative_batch_idx[batch_id]))
+                        B = images0.shape[0]
+                        v = prev_margin_violations/B
+                        x = max(2, math.floor((1 - v) * 10))
+                        y = x + 5
+                        random_k = random.randint(x, y)
+                        total_k = random_k
+                        print(f"\n=>[x, y] = [{x}, {y}]\n")
+                        
+                    self.negative_batch_idx.append(NegSamplerStatic(self.model, images1, k=total_k)) # negative with momentum model
+
+                # print("Len idx: ", len(self.negative_batch_idx[batch_id]))
                 negative_samples = images1[self.negative_batch_idx[batch_id]]
-                print("Negative samples: ", negative_samples[0].min(), negative_samples[0].max())
+                # print("Negative samples: ", negative_samples[0].min(), negative_samples[0].max())
 
             with torch.cuda.amp.autocast():
                 neg_batch, neg_batch_patch= self.model(negative_samples)
@@ -411,8 +422,6 @@ class Trainer:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             scaler.step(self.optimizer)
             scaler.update()
-            
-
         
         self.writer.add_scalar('Epoch/Current', epoch, global_step=epoch)
         self.writer.add_scalars(
@@ -427,12 +436,12 @@ class Trainer:
 
         if self.neg_loss == "simclr":
             with open(self.log_file, 'a') as f:
-                f.write(f"Epoch {epoch}: Total Loss = {running_loss/len(self.train_loader):.4f}, NT-Xent Loss = {running_loss2/len(self.train_loader):.8f}, MSE Loss = {running_loss3/len(self.train_loader):.8f}, Triplet Loss = {running_loss1/len(self.train_loader):.8f}, Alpha = {alpha:.4f}, Pos distance: {running_post_dist/len(self.train_loader)}, Neg distance: {running_neg_dist/len(self.train_loader)}, Margin violations: {running_margin_violations/len(self.train_loader)}\n")
+                f.write(f"Epoch {epoch}: Total Loss = {running_loss/len(self.train_loader):.4f}, NT-Xent Loss = {running_loss2/len(self.train_loader):.8f}, MSE Loss = {running_loss3/len(self.train_loader):.8f}, Triplet Loss = {running_loss1/len(self.train_loader):.8f}, Alpha = {alpha:.4f}, Pos distance: {running_post_dist/len(self.train_loader)}, Neg distance: {running_neg_dist/len(self.train_loader)}, Margin violations: {running_margin_violations/len(self.train_loader)}, Total k: {total_k}\n")
         elif self.neg_loss == "mae":
             with open(self.log_file, 'a') as f:
                 f.write(f"Epoch {epoch}: Total Loss = {running_loss/len(self.train_loader):.4f}, MAE Loss = {running_loss2/len(self.train_loader):.8f}, Triplet Loss = {running_loss1/len(self.train_loader):.4f}, Alpha = {alpha:.4f}, Pos distance: {running_post_dist/len(self.train_loader)}, Neg distance: {running_neg_dist/len(self.train_loader)}, Margin violations: {running_margin_violations/len(self.train_loader)} \n")
 
-        return running_loss/len(self.train_loader),running_loss1/len(self.train_loader), running_loss2/len(self.train_loader), neg_batch
+        return running_loss/len(self.train_loader),running_loss1/len(self.train_loader), running_loss2/len(self.train_loader), neg_batch, running_margin_violations/len(self.train_loader)
     
     def train(self):
         if self.mode == "mae":
@@ -456,6 +465,7 @@ class Trainer:
             train_one_epoch = self.train_one_epoch_simclr_neg_sample
             neg_batch_idx= [torch.Tensor([]) for _ in range(len(self.train_loader))]
         alpha=1
+        prev_margin_violations = 0
         for epoch in range(self.epochs):
 
             if self.neg_sampling:
@@ -473,11 +483,8 @@ class Trainer:
             print(f"Epoch {epoch}/{self.epochs}")
             if self.neg_sampling:
                 #momentum_val = cosine_schedule(epoch, self.epochs, 0.99, 0.999)
-                train_loss, train_trip_loss, train_ntxent_loss, neg_batch = train_one_epoch(epoch=epoch, alpha=alpha, neg_batch_idx=neg_batch_idx, momentum_val=self.momentum_ema, scaler=scaler)
-                if self.neg_loss == "simclr":
-                    print(f"Total train loss: {train_loss:.4f}, Triplet loss: {train_trip_loss}, NT-Xent loss: {train_ntxent_loss},  Alpha: {alpha}")
-                elif self.neg_loss == "mae":
-                    print(f"Total train loss: {train_loss:.4f}, Triplet loss: {train_trip_loss}, MAE loss: {train_ntxent_loss},  Alpha: {alpha}")
+                train_loss, train_trip_loss, train_ntxent_loss, neg_batch, prev_margin_violations = train_one_epoch(epoch=epoch, alpha=alpha, neg_batch_idx=neg_batch_idx, momentum_val=self.momentum_ema, scaler=scaler, prev_margin_violations=prev_margin_violations)
+                print(f"Total train loss: {train_loss:.4f}, Triplet loss: {train_trip_loss}, NT-Xent loss: {train_ntxent_loss},  Alpha: {alpha}")
             else:
                 train_loss = train_one_epoch(epoch=epoch, alpha=alpha, scaler=scaler)
                 print(f"Train loss: {train_loss:.4f}")
