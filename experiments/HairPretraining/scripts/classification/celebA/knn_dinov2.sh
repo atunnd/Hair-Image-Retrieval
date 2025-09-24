@@ -1,10 +1,10 @@
 
 python knn_classification.py \
-  --save_path classification_output_dir_Figaro \
+  --save_path classification_output_dir_celebA \
   --size 224 \
-  --train_annotation /mnt/mmlab2024nas/thanhnd_student/QuocAnh/FCIR/Baselines/Composed-Image-Retrieval/experiments/HairPretraining/data/figaro_training.csv \
-  --test_annotation /mnt/mmlab2024nas/thanhnd_student/QuocAnh/FCIR/Baselines/Composed-Image-Retrieval/experiments/HairPretraining/data/figaro_testing.csv \
-  --img_dir /mnt/mmlab2024nas/thanhnd_student/QuocAnh/FCIR/Baselines/Composed-Image-Retrieval/Figaro/Figaro-1k/Total \
+  --train_annotation /mnt/mmlab2024nas/thanhnd_student/QuocAnh/FCIR/Baselines/Composed-Image-Retrieval/experiments/HairClassification/data/data_analysis/data_train_combination3.csv \
+  --test_annotation /mnt/mmlab2024nas/thanhnd_student/QuocAnh/FCIR/Baselines/Composed-Image-Retrieval/experiments/HairClassification/data/data_analysis/data_test_combination3.csv \
+  --img_dir /mnt/mmlab2024nas/thanhnd_student/QuocAnh/FCIR/Baselines/Composed-Image-Retrieval/experiments/HairClassification/data/hair_regions/train/dummy_class \
   --dataset Figaro \
   --mode dinov2 \
   --model vit_b_16 \

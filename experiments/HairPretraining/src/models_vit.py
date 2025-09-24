@@ -43,6 +43,7 @@ class PatchEmbed(nn.Module):
         self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity()
 
     def forward(self, x):
+        #print("\nx: ", x.shape)
         B, C, H, W = x.shape
         x = self.proj(x)
         if self.flatten:

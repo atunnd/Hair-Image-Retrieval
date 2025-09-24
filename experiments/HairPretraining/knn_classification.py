@@ -4,11 +4,11 @@ from src.classification_engine import Classifier
 from utils.utils import set_seed
 import yaml
 import os
-from utils.transform import get_test_transform, get_train_transform, TwoCropTransform, get_siaMIM_transform
+from utils.transform import get_test_transform, get_train_transform, TwoCropTransform, get_siaMIM_transform, DataAugmentationForSIM
 from utils.dataloader import CustomDataset
 import torch
 from torch.utils.data import DataLoader
-from src.backbone import SupConResNet, SimCLR, MAE, DINOv2, SimMIM, OriginSimCLR, ViTFeatureExtractor
+from src.backbone import SupConResNet, SimCLR, MAE, DINOv2, SimMIM, OriginSimCLR, ViTFeatureExtractor, SiameseIMViT
 import torch
 import torchvision
 from torch import nn
@@ -25,15 +25,19 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.metrics import classification_report, accuracy_score
-from utils.transform import DataAugmentationForSIMWithMask
 import numpy as np
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     confusion_matrix, classification_report, roc_auc_score,
     log_loss
 )
-from utils import models_vit
+from functools import partial
 
+class LayerNorm(nn.LayerNorm):
+
+    @torch.cuda.amp.autocast(enabled=False)
+    def forward(self, input):
+        return super(LayerNorm, self).forward(input.float())
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Self-supervised/Supervised Trainer Arguments")
@@ -95,8 +99,10 @@ def main(args):
         train_transform = MAETransform(input_size=224)
         test_transform = MAETransform(input_size=224)
     elif args.mode == "siaMIM":
-        train_transform = get_siaMIM_transform()
-        test_transform = get_siaMIM_transform()
+        state_dict = torch.load(args.checkpoint_path, map_location=args.device)
+        ckpt_args = state_dict["args"]
+        train_transform = DataAugmentationForSIM(args=ckpt_args)
+        test_transform = DataAugmentationForSIM(args=ckpt_args)
 
     if args.mode == "simclr_supcon":
         train_dataset = CustomDataset(args.train_annotation, args.img_dir, TwoCropTransform(train_transform))
@@ -149,27 +155,16 @@ def main(args):
         
     
     elif args.mode == "siaMIM":
-        model = "vit_base_patch16"
-
-        # Build model
-        vit_model = models_vit.__dict__[model](
-            drop_path_rate=0.0,
-            global_pool=True,
-            init_values=None
-        )
-
-        checkpoint = torch.load(args.checkpoint_path, map_location=args.device, weights_only=False)
-        checkpoint_model = checkpoint['model']
-        state_dict = vit_model.state_dict()
-        for k in ["head.weight", "head.bias"]:
-            if k in checkpoint_model and k in state_dict and checkpoint_model[k].shape != state_dict[k].shape:
-                print(f"Removing key {k} from pretrained checkpoint")
-                del checkpoint_model[k]
-
-        msg = vit_model.load_state_dict(checkpoint_model)
-        print("Model loading message:", msg)
         
-        model = ViTFeatureExtractor(vit_model.to(args.device))
+        state_dict = torch.load(args.checkpoint_path, map_location=args.device)
+        backbone = state_dict['model']
+        ckpt_args = state_dict["args"]
+        model = SiameseIMViT(
+            patch_size=16, embed_dim=768, depth=12, num_heads=12,
+            decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
+            mlp_ratio=4, norm_layer=partial(LayerNorm, eps=1e-6), args=ckpt_args)
+        model.load_state_dict(backbone)
+        print("✅ Model weights loaded!")
 
     trainer = Classifier(model, train_loader, test_loader, args)
     trainer.train()
