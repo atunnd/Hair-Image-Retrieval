@@ -8,7 +8,6 @@ from utils.dataloader import CustomDataset
 import torch
 from torch.utils.data import DataLoader
 from src.backbone import SupConResNet, SimCLR, MAE, DINOv2, SimMIM, OriginSimCLR
-from utils.transform import DataAugmentationForSIMWithMask
 import torch
 import torchvision
 from torch import nn
