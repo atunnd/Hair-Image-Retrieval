@@ -828,8 +828,9 @@ class DINOv2(Module):
         return cls_tokens, masked_features
 
     def extract_features(self, x):
-        features = self.student_backbone(x)
-        cls_tokens = features[:, 0:1]
+        features = self.student_backbone.encode(x)
+        # lấy CLS token (B, D)
+        cls_tokens = features[:, 0]
         return cls_tokens
 
 class ViTFeatureExtractor:
@@ -1383,42 +1384,64 @@ class SiameseIMViT(nn.Module):
 
         return loss
     
-    def extract_features(self, x, return_cls=True):
-        """
-        Extract embeddings from SiameseIMViT (loss_type='sim') for inference/retrieval.
+    # def extract_features(self, x, return_cls=True):
+    #     """
+    #     Extract embeddings from SiameseIMViT (loss_type='sim') for inference/retrieval.
         
-        Args:
-            x (Tensor): Input batch, shape (B, C, H, W)
-            return_cls (bool): Nếu True -> trả về embedding cls token,
-                            Nếu False -> trả về toàn bộ patch embeddings.
+    #     Args:
+    #         x (Tensor): Input batch, shape (B, C, H, W)
+    #         return_cls (bool): Nếu True -> trả về embedding cls token,
+    #                         Nếu False -> trả về toàn bộ patch embeddings.
         
-        Returns:
-            Tensor: Embeddings (B, D) nếu return_cls=True, 
-                    hoặc (B, N, D) nếu return_cls=False.
-        """
-        # patchify + pos embed
-        x = self.patch_embed(x)   # (B, N, D)
+    #     Returns:
+    #         Tensor: Embeddings (B, D) nếu return_cls=True, 
+    #                 hoặc (B, N, D) nếu return_cls=False.
+    #     """
+    #     # patchify + pos embed
+    #     x = self.patch_embed(x)   # (B, N, D)
+    #     # thêm cls token
+    #     cls_tokens = self.cls_token.expand(x.shape[0], -1, -1)
+    #     x = torch.cat((cls_tokens, x), dim=1)
+    #     x = x + self.pos_embed
+
+    #     # forward qua backbone transformer
+    #     for blk in self.blocks:
+    #         x = blk(x)
+    #     if hasattr(self, "norm"):
+    #         x = self.norm(x)
+    
+
+        # # projector để ra embedding cuối
+        # x = self.decoder_embed(x)
+        # if self.args.projector_depth > 0:
+        #     for blk in self.projector_decoder_blocks:
+        #         x = blk(x)
+
+        # if return_cls:
+        #     return x[:, 0]   # lấy cls token embedding (B, D)
+        # else:
+        #     return x 
+    def extract_features(self, x1, mask=None):
+        # patch embedding
+        online_x1 = self.patch_embed(x1)
+        online_x1 = online_x1 + self.pos_embed[:, 1:, :]
+        
+        if mask is not None:  # nếu muốn dùng mask
+            online_x1 = online_x1[~mask.bool()].view(online_x1.shape[0], -1, online_x1.shape[-1])
+        else:  # không mask thì lấy full
+            pass
+
         # thêm cls token
-        cls_tokens = self.cls_token.expand(x.shape[0], -1, -1)
-        x = torch.cat((cls_tokens, x), dim=1)
-        x = x + self.pos_embed
+        cls_tokens = self.cls_token.expand(online_x1.shape[0], -1, -1) + self.pos_embed[:, 0, :].unsqueeze(1)
+        online_x1 = torch.cat((cls_tokens, online_x1), dim=1)
 
-        # forward qua backbone transformer
+        # forward qua các transformer block
         for blk in self.blocks:
-            x = blk(x)
-        if hasattr(self, "norm"):
-            x = self.norm(x)
+            online_x1 = blk(online_x1)
 
-        # projector để ra embedding cuối
-        x = self.decoder_embed(x)
-        if self.args.projector_depth > 0:
-            for blk in self.projector_decoder_blocks:
-                x = blk(x)
-
-        if return_cls:
-            return x[:, 0]   # lấy cls token embedding (B, D)
-        else:
-            return x 
+        # chỉ lấy cls token (B, D)
+        cls_feature = online_x1[:, 0, :]
+        return cls_feature
 
 
 

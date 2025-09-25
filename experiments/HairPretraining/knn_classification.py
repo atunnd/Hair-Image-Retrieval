@@ -153,9 +153,7 @@ def main(args):
         model.load_state_dict(state_dict)
         print("✅ Model weights loaded!")
         
-    
     elif args.mode == "siaMIM":
-        
         state_dict = torch.load(args.checkpoint_path, map_location=args.device)
         backbone = state_dict['model']
         ckpt_args = state_dict["args"]
