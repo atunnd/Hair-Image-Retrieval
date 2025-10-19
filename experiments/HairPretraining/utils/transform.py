@@ -7,16 +7,92 @@ from torchvision.io import read_image
 import torch
 import torchvision.transforms as T
 
+from typing import Tuple, Union, Dict, List
+from PIL.Image import Image
+from torch import Tensor
+from lightly.transforms.torchvision_v2_compatibility import torchvision_transforms as T
+from lightly.transforms.utils import IMAGENET_NORMALIZE
+
+
+def _odd_kernel(k):
+    k = int(k)
+    if k % 2 == 0:
+        k = max(1, k - 1)
+    return max(1, k)
+
+
+class SHAMTransform:
+    """
+    Trả về 2 view:
+      - 'weak': dành cho teacher / full image (nhẹ)
+      - 'strong': dành cho student / masked view (mạnh hơn nhưng vừa phải)
+    """
+
+    def __init__(
+        self,
+        input_size: Union[int, Tuple[int, int]] = 224,
+        normalize: Dict[str, List[float]] = IMAGENET_NORMALIZE,
+        # weak params
+        weak_resize_scale: Tuple[float, float] = (0.9, 1.0),
+        # strong params (vừa phải)
+        strong_crop_scale: Tuple[float, float] = (0.2, 1.0),
+        color_jitter_strength: float = 0.4,
+        gaussian_blur_prob: float = 0.5,
+        grayscale_prob: float = 0.2,
+    ):
+        # ----- Weak transform (teacher) -----
+        # Giữ thông tin không gian nhiều nhất: resize + center crop (ít biến dạng)
+        weak_transforms = [
+            T.Resize(input_size, interpolation=3),
+            T.CenterCrop(input_size),
+            T.RandomHorizontalFlip(p=0.5),  # nhẹ, optional
+            T.ToTensor(),
+        ]
+        if normalize:
+            weak_transforms.append(
+                T.Normalize(mean=normalize["mean"], std=normalize["std"])
+            )
+        self.weak = T.Compose(weak_transforms)
+
+        # ----- Strong transform (student, masked view) -----
+        # Crop mạnh hơn + color jitter + blur + grayscale (vừa phải)
+        strong_transforms = [
+            T.RandomResizedCrop(input_size, scale=strong_crop_scale, interpolation=3),
+            T.RandomHorizontalFlip(p=0.5),
+            # Color jitter applied with high prob but moderate strength
+            T.RandomApply([T.ColorJitter(
+                brightness=color_jitter_strength,
+                contrast=color_jitter_strength,
+                saturation=color_jitter_strength,
+                hue=0.1
+            )], p=0.8),
+            T.RandomGrayscale(p=grayscale_prob),
+            # Gaussian blur: kernel proportional to input_size
+            T.RandomApply([T.GaussianBlur(kernel_size=_odd_kernel(0.1 * input_size))], p=gaussian_blur_prob),
+            T.ToTensor(),
+        ]
+        if normalize:
+            strong_transforms.append(
+                T.Normalize(mean=normalize["mean"], std=normalize["std"])
+            )
+        self.strong = T.Compose(strong_transforms)
+
+    def __call__(self, image: Union[Tensor, Image]) -> Dict[str, Tensor]:
+        """
+        Args:
+            image: PIL Image or Tensor
+        Returns:
+            dict with keys {'weak': tensor, 'strong': tensor}
+        """
+        return {"weak": self.weak(image), "strong": self.strong(image)}
+
+
 knn_transform = transforms.Compose([
+    transforms.Resize(256),
     T.CenterCrop(224),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
-# knn_transform = transforms.Compose([
-#     transforms.Resize((224, 224)),
-#     transforms.ToTensor(),
-#     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-# ])
 
 positive_transform = T.Compose([
     T.RandomRotation(degrees=(-15, 15)),

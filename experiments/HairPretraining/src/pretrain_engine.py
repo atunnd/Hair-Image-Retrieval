@@ -8,8 +8,10 @@ import math
 
 import lightly
 from lightly.loss import NTXentLoss
-from utils.utils import get_optimizer, linear_increase_alpha, margin_decay, mse_alignment_loss
+from utils.utils import get_optimizer, linear_increase_alpha, margin_decay, mse_alignment_loss, get_latest_checkpoint
 from utils.transform import positive_transform, negative_transform, PositiveMaskingTransform
+
+from utils.losses import PatchContrastiveLoss 
 
 #from utils.losses import DINOLoss, IBOTPatchLoss
 from .neg_sampling import NegSamplerClasses, NegSamplerRandomly, NegSamplerNN, NegSamplerStatic
@@ -29,23 +31,34 @@ import random
 
 class Trainer:
     def __init__(self, model, train_loader, val_loader, args):
+
+        # load model
         self.model = model.to(args.device)
+        # load dataloader
         self.train_loader = train_loader
-        self.val_loader = val_loader
+        # training setting
         self.epochs = args.epochs
         self.device = args.device
-        self.save_path = args.save_path
-        self.mode = args.mode
         self.lr = args.lr
         self.weight_decay = args.weight_decay
         self.beta1 = args.beta1
         self.beta2 = args.beta2
         self.device_id = args.device_id
+        self.args = args
+        self.save_path = args.save_path
+        self.start_epoch = 0
+        # choosing mode
+        self.mode = args.mode
+        self.momentum_ema = args.ema
 
+
+        ##########################################
+        #    Setting loss function for each mode #
+        ##########################################
         if self.mode == 'mae':
             self.criterion = nn.MSELoss()
         elif self.mode == 'simclr':
-            self.criterion = NTXentLoss()
+            self.criterion = NTXentLoss(temperature=args.loss_temp)
         elif self.mode == 'simclr_supcon':
             self.criterion = SupConLoss()
         elif self.mode == "dinov2":
@@ -56,58 +69,89 @@ class Trainer:
             self.criterion = "Total loss DINO, IBOTPatchLoss, KoLeoLoss"
         elif self.mode == "simMIM":
             self.criterion = nn.L1Loss()
-
+        elif self.mode == "SHAM":
+            self.criterion1 = NTXentLoss(temperature=args.temp)
+            self.criterion2 = PatchContrastiveLoss(temperature=args.temp)
+        
+        # optimizer configuration
         self.optimizer = get_optimizer(self.model, self.lr, self.weight_decay, self.beta1, self.beta2)
-        self.neg_sampling = False
-        self.neg_loss = args.neg_loss
-        self.warm_up_epochs = self.epochs
+
+        # choosing backbone
         self.mode_model = args.model
 
-        if args.neg_sample:
+        ####################################
+        #        Loading checkpoint        #
+        ####################################
+        if self.args.continue_training:
+            try:
+                latest_ckpt_path = get_latest_checkpoint(args.checkpoint_folder)
+                checkpoint = torch.load(latest_ckpt_path, map_location=self.device)
+                self.save_path = args.checkpoint_folder
+                print(f"✅ Found checkpoint: {latest_ckpt_path}")
+            except (FileNotFoundError, TypeError):
+                print("⚠️ No valid checkpoint found, starting from scratch.")
+                self.start_epoch = 0
+                global_loss, local_loss = 0.0, 0.0
+            else:
+                # Load model weights
+                self.model.load_state_dict(checkpoint['model_state_dict'])
 
-            # neg samling
-            self.neg_sampling = True
-            self.warm_up_epochs = args.warm_up_epochs
-            self.sampling_frequency = args.sampling_frequency
-            self.momentum_ema = args.ema
+                # Khởi tạo optimizer mới khớp với model hiện tại
+                self.optimizer = get_optimizer(
+                    self.model,
+                    self.args.lr,
+                    self.args.weight_decay,
+                    self.args.beta1,
+                    self.args.beta2
+                )
 
-            self.margin_step=0
+                # Load optimizer state
+                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
-            self.save_path = os.path.join(self.save_path, f"{self.mode}_{self.mode_model}_neg_sample_supervised_mse_static_alpha")
-            print("Training with supervised neg sample")
-            
-            os.makedirs(self.save_path, exist_ok=True)
-            print("Create save directory: ", self.save_path)
+                # Load epoch và các thông tin bổ sung
+                self.start_epoch = checkpoint.get('epoch', 0)
+                global_loss = checkpoint.get('global_loss', 0.0)
+                local_loss = checkpoint.get('local_loss', 0.0)
 
-            self.log_file = os.path.join(self.save_path, 'training_log.txt')
-            with open(self.log_file, 'w') as f:  # 'w' để tạo mới hoặc reset file
-                f.write("Training Log - Loss per Epoch\n")
+                print(f"🔁 Loaded checkpoint from epoch {self.start_epoch}")
 
-            self.log_dir = os.path.join(self.save_path, "logs")
-            self.writer = SummaryWriter(log_dir=self.log_dir)  # Thư mục lưu log, tự động tạo nếu chưa có
-            
-            # init triplet loss
-            self.triplet_loss_stage1 = nn.TripletMarginLoss(margin=0.7, p=2, eps=1e-7)
-            self.triplet_loss_stage2 = nn.TripletMarginLoss(margin=0.5, p=2, eps=1e-7)
-
-            # masking transform
-            self.positive_masking_transform = PositiveMaskingTransform(mask_ratio_range=(0.1, 0.5))
-
-            # extract negative sample
-            self.negative_batch_idx =[]
-
-            # for batch in tqdm(self.train_loader, desc="Negative mining"):
-            #     #images = batch[0][1]
-            #     images = batch[0][1]
-            #     images = images.to(self.device)
-            #     self.negative_batch_idx.append(NegSamplerNN(images, 7, 'cosine'))
-            # for batch in tqdm(self.train_loader, desc="Creating idx stores"):
-            #     images = batch[0][1]
-            #     self.negative_batch_idx.append(np.arange(0, len(images)).tolist())
-
+                # Đảm bảo optimizer trên đúng device (đặc biệt khi map_location='cpu')
+                for state in self.optimizer.state.values():
+                    for k, v in state.items():
+                        if isinstance(v, torch.Tensor):
+                            state[k] = v.to(self.device)
         else:
+            self.start_epoch = 0
+            global_loss, local_loss = 0.0, 0.0
+
+
+        ####################################
+        #    Creating saving directory     #
+        ####################################    
+        self.momentum_ema = args.ema
+        if args.mode=="SHAM":
+            self.save_path = os.path.join(self.save_path, f"{self.mode}_{self.mode_model}_{self.args.SHAM_mode}")    
+        else: 
             self.save_path = os.path.join(self.save_path, f"{self.mode}_{self.mode_model}")
+        if not os.path.exists(self.save_path):
+            print(f"Save {args.mode} at {self.save_path}")      
             os.makedirs(self.save_path, exist_ok=True)
+            new_log=True
+        else:
+            new_log=False
+
+
+        mode = 'a' if not new_log else 'w'
+        self.log_file = os.path.join(self.save_path, 'training_log.txt')
+        with open(self.log_file, mode) as f: 
+            if new_log:
+                f.write("Training Log - Loss per Epoch\n")
+            else:
+                f.write("\n---- Resume training ----\n")
+
+        self.log_dir = os.path.join(self.save_path, "logs")
+        os.makedirs(self.log_dir, exist_ok=True)
+        self.writer = SummaryWriter(log_dir=self.log_dir) 
     
     def train_one_epoch_simclr(self, epoch=0, alpha=0, scaler=None):
         self.model.train()
@@ -309,115 +353,36 @@ class Trainer:
         
         return running_loss/len(self.train_loader)
     
-    def train_one_epoch_simclr_neg_sample(self, epoch=0, alpha=0, neg_batch_idx=None, momentum_val=0.99, scaler=None, prev_margin_violations=0):
+    def train_one_epoch_SHAM(self, epoch=0, momentum_val=0.99, scaler=None):
         self.model.train()
-        running_loss = 0.0
-        running_loss1 = 0.0
-        running_loss2 = 0.0
-        running_loss3 = 0.0
-        running_post_dist =.0
-        running_neg_dist=.0
-        running_margin_violations=0
-        total_k=0
+        running_loss_total = 0.0
+        running_loss_global = 0.0
+        running_loss_local = 0.0
+
         for batch_id, batch in enumerate(tqdm(self.train_loader, desc="Training with negative samples")):
             self.optimizer.zero_grad()
-            images, hair_region_idx = batch[0], batch[1]
-            current_m = momentum_val  # Hoặc: current_m = 0.996 + (0.004 * min(1, epoch / self.warm_up_epochs))
+            images = batch[0]
+            current_m = momentum_val 
         
-            update_momentum(self.model.backbone, self.model.backbone_momentum, m=current_m)
-            update_momentum(self.model.projection_head, self.model.projection_head_momentum, m=current_m)
-            # if batch_id == 0:  # Chỉ log batch đầu tiên để tránh spam
-            #     for (student_name, student_param), (teacher_name, teacher_param) in zip(
-            #         self.model.backbone.named_parameters(), self.model.backbone_momentum.named_parameters()
-            #     ):
-            #         diff = torch.norm(student_param - teacher_param).item()
-            #         print(f"EMA diff for {student_name}: {diff:.6f}")
-            trip_loss = 0.0
-
-            if self.neg_loss == "mae":
-                images0 = images[0].to(self.device)
-                images1 = images0.clone()
-            elif self.neg_loss == "simclr":
-                images0, images1 = images[0], images[1]
-                images0 = images0.to(self.device)
-                images1 = images1.to(self.device)
-
-            ### STAGE 1: Randomly negative sampling
-            if self.warm_up_epochs > epoch + 1:
-                negative_samples = NegSamplerRandomly(images1)
-            ### STAGE 2: Hard negative mining
-            else:
-                if (epoch + 1) == self.warm_up_epochs:
-                    if batch_id == 0:
-                        self.negative_batch_idx = []
-
-                        B = images0.shape[0]
-                        v = prev_margin_violations/B
-                        x = max(2, math.floor((1 - v) * 10))
-                        y = x + 5
-                        random_k = random.randint(x, y)
-                        total_k = random_k
-                        print(f"\n=>[x, y] = [{x}, {y}]\n")
-                        
-                    self.negative_batch_idx.append(NegSamplerStatic(self.model, images1, k=total_k)) # negative with momentum model
-
-                # print("Len idx: ", len(self.negative_batch_idx[batch_id]))
-                negative_samples = images1[self.negative_batch_idx[batch_id]]
-                # print("Negative samples: ", negative_samples[0].min(), negative_samples[0].max())
-
-            with torch.cuda.amp.autocast():
-                neg_batch, neg_batch_patch= self.model(negative_samples)
-                pos_samples = positive_transform(images1)
-                pos_batch, pos_batch_patch= self.model(pos_samples)
-                anchor_batch, anchor_batch_patch= self.model(images0)
-                masked_pos_samples= self.positive_masking_transform(pos_samples)
-                masked_pos_batch, masked_pos_batch_patch= self.model.forward_momentum(masked_pos_samples)
+            update_momentum(self.model.backbone, self.model.teacher_backbone, m=current_m)
+            update_momentum(self.model.proj_global, self.model.teacher_proj_global, m=current_m)
+            update_momentum(self.model.proj_local, self.model.teacher_proj_local, m=current_m)
+            
+            with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+                x_weak = images['weak'].to(self.device) # teacher input
+                x_strong = images['strong'].to(self.device) # student input
                 
-            #print("neg_batch: ", neg_batch[0].min(), neg_batch[0].max())
-            #print("pos_batch: ", pos_batch[0].min(), pos_batch[0].max())
-            #print("anchor_batch: ", anchor_batch[0].min(), anchor_batch[0].max())
-            #print("masked_batch: ", masked_pos_batch[0].min(), masked_pos_batch[0].max())
-
-
-            if self.neg_loss == "simclr":
-                neg_batch = F.normalize(neg_batch, p=2, dim=1)
-                pos_batch = F.normalize(pos_batch, p=2, dim=1)
-                anchor_batch = F.normalize(anchor_batch, p=2, dim=1)
-                masked_pos_batch = F.normalize(masked_pos_batch, p=2, dim=1)
-
-            with torch.no_grad():
-                pos_dist = torch.norm(anchor_batch - pos_batch, p=2, dim=1)
-                neg_dist = torch.norm(anchor_batch - neg_batch, p=2, dim=1)
-                if self.warm_up_epochs > epoch + 1:
-                    margin = self.triplet_loss_stage1.margin
-                else:
-                    margin = self.triplet_loss_stage2.margin
-                #margin = trip_margin
-                violations = (pos_dist - neg_dist + margin > 0)  # True = bị phạt
-                running_post_dist += pos_dist.mean().item()
-                running_neg_dist += neg_dist.mean().item()
-                running_margin_violations += violations.sum().item()
-
-            with torch.cuda.amp.autocast():
-                if self.warm_up_epochs > epoch + 1:
-                    trip_loss = self.triplet_loss_stage1(anchor_batch, pos_batch, neg_batch)
-                else:
-                    trip_loss = self.triplet_loss_stage2(anchor_batch, pos_batch, neg_batch)   
-                beta = 0.2
-                running_loss1 += trip_loss.item()
+                res = self.model(img_student=x_strong, img_teacher=x_weak)
+                global_s, global_t, local_s, local_t = res['global_s'], res['global_t'], res['local_s'], res['local_t']
                 
-                nt_xent_loss = self.criterion(pos_batch, anchor_batch)
-                running_loss2 += nt_xent_loss.item()
-
-                if "vit" in str(self.mode_model):
-                    mse_loss = F.mse_loss(pos_batch_patch, masked_pos_batch_patch, reduction='mean')
-                else:
-                    mse_loss = F.mse_loss(pos_batch, masked_pos_batch, reduction='mean')
-                running_loss3 += mse_loss.item()
-                
-                total_loss = nt_xent_loss + alpha*trip_loss + beta * mse_loss
-                running_loss += total_loss.detach()
-
+                global_loss = self.criterion1(global_s, global_t)
+                local_loss = self.criterion2(local_s, local_t)
+                total_loss = global_loss + 0.5*local_loss
+            
+            running_loss_total += global_loss.item()
+            running_loss_global += local_loss.item()
+            running_loss_local += total_loss.item()
+            
             #total_loss.backward()
             #self.optimizer.step()
             scaler.scale(total_loss).backward()
@@ -430,21 +395,17 @@ class Trainer:
         self.writer.add_scalars(
             'Loss/Avg_per_Epoch',  # Nhóm dưới tag này để dễ xem theo epoch
             {
-                'total': running_loss/len(self.train_loader),
-                'nt_xent': running_loss2/len(self.train_loader),
-                'triplet': running_loss1/len(self.train_loader)
+                'total_loss': running_loss_total/len(self.train_loader),
+                'global_loss': running_loss_global/len(self.train_loader),
+                'local_loss': running_loss_local/len(self.train_loader)
             },
             global_step=epoch  # Sử dụng epoch trực tiếp làm step cho log epoch-level
         )
 
-        if self.neg_loss == "simclr":
-            with open(self.log_file, 'a') as f:
-                f.write(f"Epoch {epoch}: Total Loss = {running_loss/len(self.train_loader):.4f}, NT-Xent Loss = {running_loss2/len(self.train_loader):.8f}, MSE Loss = {running_loss3/len(self.train_loader):.8f}, Triplet Loss = {running_loss1/len(self.train_loader):.8f}, Alpha = {alpha:.4f}, Pos distance: {running_post_dist/len(self.train_loader)}, Neg distance: {running_neg_dist/len(self.train_loader)}, Margin violations: {running_margin_violations/len(self.train_loader)}, Total k: {total_k}\n")
-        elif self.neg_loss == "mae":
-            with open(self.log_file, 'a') as f:
-                f.write(f"Epoch {epoch}: Total Loss = {running_loss/len(self.train_loader):.4f}, MAE Loss = {running_loss2/len(self.train_loader):.8f}, Triplet Loss = {running_loss1/len(self.train_loader):.4f}, Alpha = {alpha:.4f}, Pos distance: {running_post_dist/len(self.train_loader)}, Neg distance: {running_neg_dist/len(self.train_loader)}, Margin violations: {running_margin_violations/len(self.train_loader)} \n")
+        with open(self.log_file, 'a') as f:
+            f.write(f"\nEpoch {epoch}: Total Loss = {running_loss_total/len(self.train_loader):.6f}, Global Loss = {running_loss_global/len(self.train_loader):.6f}, Local Loss = {running_loss_local/len(self.train_loader):.6f}\n")
 
-        return running_loss/len(self.train_loader),running_loss1/len(self.train_loader), running_loss2/len(self.train_loader), neg_batch, running_margin_violations/len(self.train_loader)
+        return running_loss_total/len(self.train_loader), running_loss_global/len(self.train_loader), running_loss_local/len(self.train_loader)
     
     def train(self):
         if self.mode == "mae":
@@ -455,46 +416,34 @@ class Trainer:
             train_one_epoch = self.train_one_epoch_simclr_supcon
         elif self.mode == "dinov2":
             train_one_epoch = self.train_one_epoch_dinov2
-            print("Training with dinov2")
         elif self.mode == "simMIM":
             train_one_epoch = self.train_one_epoch_simMIM
+        elif self.mode == "SHAM":
+            train_one_epoch = self.train_one_epoch_SHAM
 
-        
         scaler = torch.cuda.amp.GradScaler() 
 
-        print(f"Training model {self.mode} with losses {self.criterion}")
-        
-        if self.neg_sampling:
-            train_one_epoch = self.train_one_epoch_simclr_neg_sample
-            neg_batch_idx= [torch.Tensor([]) for _ in range(len(self.train_loader))]
-        alpha=1
-        prev_margin_violations = 0
-        for epoch in range(self.epochs):
-
-            if self.neg_sampling:
-                # if self.warm_up_epochs <= epoch + 1:
-                #     #alpha = linear_increase_alpha(start_alpha=.01, current_epoch=(epoch+1)-self.warm_up_epochs, max_epochs=self.epochs-self.warm_up_epochs)
-                # else:
-                #     alpha = 0.01
-                alpha = 0.5
-            #     alpha = linear_increase_alpha(start_alpha=.01, current_epoch=(epoch+1), max_epochs=self.epochs-100)
-            #     margin = margin_decay(epoch=(epoch+1),
-            #                             total_epochs=self.epochs-100,
-            #                             min_margin=0.5,
-            #                             max_margin=0.7,
-            #                             step=self.margin_step)
+        for epoch in range(self.start_epoch, self.epochs):
             print(f"Epoch {epoch}/{self.epochs}")
-            if self.neg_sampling:
-                #momentum_val = cosine_schedule(epoch, self.epochs, 0.99, 0.999)
-                train_loss, train_trip_loss, train_ntxent_loss, neg_batch, prev_margin_violations = train_one_epoch(epoch=epoch, alpha=alpha, neg_batch_idx=neg_batch_idx, momentum_val=self.momentum_ema, scaler=scaler, prev_margin_violations=prev_margin_violations)
-                print(f"Total train loss: {train_loss:.4f}, Triplet loss: {train_trip_loss}, NT-Xent loss: {train_ntxent_loss},  Alpha: {alpha}")
+            if self.mode=="SHAM":
+                total_loss, global_loss, local_loss = train_one_epoch(epoch=epoch, momentum_val=self.momentum_ema, scaler=scaler)
+                print(f"Total train loss: {total_loss:.6f}, Global loss: {global_loss:.6f}, Local loss: {local_loss:.6f}")
             else:
-                train_loss = train_one_epoch(epoch=epoch, alpha=alpha, scaler=scaler)
+                train_loss = train_one_epoch(epoch=epoch, alpha=0, scaler=scaler)
                 print(f"Train loss: {train_loss:.4f}")
             if (epoch+1) % 20 == 0:
-                output = os.path.join(self.save_path, f"model_ckpt_{epoch}.pth")
-                torch.save(self.model.state_dict(), output)
-                print(f"✅ Model saved to {self.save_path}")
+                file_name = os.path.join(self.save_path, f"model_ckpt_{epoch}.pth")
+                checkpoint = {
+                    'epoch': epoch,
+                    'model_state_dict': self.model.state_dict(),
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'args': self.args,
+                    "total_loss": total_loss,
+                    'global_loss': global_loss,
+                    'local_loss': local_loss
+                }
+                torch.save(checkpoint, file_name)
+                print(f"✅ Saved checkpoint at epoch {epoch} -> {file_name}")
 
         self.writer.close()  # Giải phóng resource
             

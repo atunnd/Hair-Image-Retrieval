@@ -85,3 +85,47 @@ def set_seed(seed=42):
 def update_momentum(student, teacher, m):
     for s_param, t_param in zip(student.parameters(), teacher.parameters()):
         t_param.data = m * t_param.data + (1 - m) * s_param.data
+
+import os
+import re
+
+def get_latest_checkpoint(checkpoint_dir, prefix="model_ckpt_", suffix=".pth"):
+    """
+    Tìm checkpoint có số epoch lớn nhất trong thư mục.
+
+    Args:
+        checkpoint_dir (str): Đường dẫn đến thư mục chứa checkpoint.
+        prefix (str): Tiền tố của tên file checkpoint.
+        suffix (str): Phần đuôi mở rộng của file checkpoint.
+
+    Returns:
+        str | None: Đường dẫn file checkpoint mới nhất, hoặc None nếu không có.
+    """
+    checkpoint_files = [
+        f for f in os.listdir(checkpoint_dir)
+        if f.startswith(prefix) and f.endswith(suffix)
+    ]
+
+    if not checkpoint_files:
+        print("⚪ Không tìm thấy checkpoint nào trong thư mục.")
+        return None
+
+    # Dùng regex để lấy số epoch trong tên file
+    pattern = re.compile(rf"{prefix}(\d+){suffix}")
+    checkpoints = []
+    for f in checkpoint_files:
+        match = pattern.match(f)
+        if match:
+            epoch = int(match.group(1))
+            checkpoints.append((epoch, f))
+
+    if not checkpoints:
+        print("⚪ Không tìm thấy checkpoint hợp lệ (không có số epoch).")
+        return None
+
+    # Lấy checkpoint có epoch lớn nhất
+    latest_epoch, latest_file = max(checkpoints, key=lambda x: x[0])
+    latest_path = os.path.join(checkpoint_dir, latest_file)
+
+    print(f"✅ Checkpoint mới nhất: {latest_file} (epoch {latest_epoch})")
+    return latest_path

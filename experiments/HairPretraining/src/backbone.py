@@ -589,55 +589,6 @@ class SimMIM(nn.Module):
         return x_out, target
     
 
-# class OriginSimCLR(nn.Module):
-#     def __init__(self, backbone, model=None, attention_pooling=False):
-#         super().__init__()
-#         self.model = model
-#         self.attn_pooling = attention_pooling
-        
-#         # Handle backbone: For ViT, wrap it
-#         if "vit" in str(model):
-#             vit = models.vit_b_16()  # Load full ViT if backbone is not already wrapped
-#             self.backbone = ViTBackbone(vit)
-#             proj_input_dim = 768  # For vit_b_16
-#             output_dim = 512
-#         else:
-#             self.backbone = backbone  # Assume ResNet-like, already Sequential[:-1]
-#             if model == "resnet18":
-#                 proj_input_dim = 512
-#                 output_dim=128
-#             elif model == "resnet50":
-#                 proj_input_dim = 2048
-#                 output_dim=1024
-#             else:
-#                 raise ValueError("Unsupported model")
-        
-#         self.projection_head = SimCLRProjectionHead(proj_input_dim, proj_input_dim, output_dim)
-        
-
-#     def forward(self, x):
-#          # ResNet: [batch, features, 1, 1]; ViT: [batch, seq_len, dim]
-        
-#         if "vit" in str(self.model):
-#             x, top_patches = self.backbone(x) 
-#             cls_token = x[:, 0, :]  # CLS token [batch, dim]
-#             z = self.projection_head(cls_token)
-#             return z, top_patches
-#         else:
-#             x = self.backbone(x) 
-#             x = x.flatten(start_dim=1)  # For CNN like ResNet [batch, features]
-#             z = self.projection_head(x)
-#             return z
-    
-#     def extract_features(self, x):
-#         features = self.backbone(x)  # ResNet: [batch, features, 1, 1]; ViT: [batch, seq_len, dim]
-        
-#         if "vit" in str(self.model):
-#             embedding = features[:, 0, :]
-#         else:
-#             embedding = features.flatten(start_dim=1)  # [batch, features] for ResNet-like
-        
-#         return embedding  # Always [batch, dim] raw from backbone
 
 from lightly.models.utils import (
     batch_shuffle,
@@ -744,8 +695,315 @@ class OriginSimCLR(nn.Module):
             return cls_token
         else:
             return self.backbone(x).flatten(start_dim=1)
-
         
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from timm.models.vision_transformer import vit_base_patch32_224
+from lightly.models import utils
+from lightly.models.modules import MAEDecoderTIMM, MaskedVisionTransformerTIMM
+
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import copy
+from timm.models.vision_transformer import vit_base_patch16_224
+from lightly.models import utils
+from lightly.models.modules import MAEDecoderTIMM, MaskedVisionTransformerTIMM
+
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import copy
+from timm.models.vision_transformer import vit_base_patch16_224
+from lightly.models import utils
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class CrossAlignBlock(nn.Module):
+    """
+    Cross-Attention Alignment Block:
+    Student embeddings attend to Teacher embeddings.
+    """
+    def __init__(self, dim, num_heads=8, mlp_ratio=4.0):
+        super().__init__()
+        self.cross_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
+        self.norm1 = nn.LayerNorm(dim)
+        self.norm2 = nn.LayerNorm(dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, int(dim * mlp_ratio)),
+            nn.GELU(),
+            nn.Linear(int(dim * mlp_ratio), dim),
+        )
+
+    def forward(self, E_s, E_t):
+        # Cross-attention: Q = student, K/V = teacher
+        attn_out, _ = self.cross_attn(
+            query=E_s, key=E_t, value=E_t
+        )
+        E_s = self.norm1(E_s + attn_out)  # residual + norm
+        E_s = self.norm2(E_s + self.mlp(E_s))  # feed-forward
+        return E_s
+
+class PosMapping(nn.Module):
+    """Learnable mapping from student PE → teacher PE space."""
+    def __init__(self, dim):
+        super().__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.GELU(),
+            nn.Linear(dim, dim)
+        )
+
+    def forward(self, pe):
+        return self.fc(pe)
+
+
+class SHAM(nn.Module):
+    """
+    MAE-style framework with EMA teacher and dual projectors:
+        - proj_global: for global-level contrastive loss (CLS or pooled)
+        - proj_local:  for local-level contrastive loss (patch embeddings)
+    Supports both pixel reconstruction and embedding prediction modes.
+    """
+
+    def __init__(
+        self,
+        vit=None,
+        decoder_dim=768,
+        mask_ratio=0.75,
+        mode="embedding",
+        pooling="mean",
+        momentum=0.996,
+    ):
+        super().__init__()
+        assert mode in ["reconstruction", "embedding"]
+        assert pooling in ["mean", "attention"]
+
+        self.mode = mode
+        self.mask_ratio = mask_ratio
+        self.pooling = pooling
+        self.momentum = momentum
+
+        # ========== Base ViT ==========
+        if vit is None:
+            vit = vit_base_patch16_224(pretrained=False)
+
+        self.backbone = MaskedVisionTransformerTIMM(vit=vit)
+        self.sequence_length = self.backbone.sequence_length
+        self.patch_size = vit.patch_embed.patch_size[0]
+        embed_dim = vit.embed_dim
+
+        #print("=>> pos_embed: ", vit.pos_embed.shape) # [1, 197, 768]
+
+        if mode == "embedding":
+            decoder_dim = embed_dim
+        elif mode == "reconstruction":
+            decoder_dim = decoder_dim
+
+        # ========== Decoder ==========
+        self.decoder = MAEDecoderTIMM(
+            num_patches=vit.patch_embed.num_patches,
+            patch_size=self.patch_size,
+            embed_dim=embed_dim,
+            decoder_embed_dim=decoder_dim,
+            decoder_depth=2,
+            decoder_num_heads=8,
+            mlp_ratio=4.0,
+        )
+
+        # =========== Cross Alignment ===========
+        self.cross_align = CrossAlignBlock(embed_dim, num_heads=8)
+        self.pos_map = PosMapping(embed_dim)
+
+        # ========== Dual Projection Heads ==========
+        # self.proj_global = nn.Sequential(
+        #     nn.Linear(embed_dim, decoder_dim),
+        #     nn.LayerNorm(decoder_dim),
+        #     nn.GELU(inplace=True),
+        #     nn.Linear(decoder_dim, decoder_dim),
+        # )
+        self.proj_global = nn.Sequential(
+            nn.Linear(embed_dim, 1024),
+            nn.LayerNorm(1024),
+            nn.GELU(),
+            nn.Linear(1024, 256),
+        )
+
+        # self.proj_local = nn.Sequential(
+        #     nn.Linear(embed_dim, decoder_dim),
+        #     nn.LayerNorm(decoder_dim),
+        #     nn.GELU(inplace=True),
+        #     nn.Linear(decoder_dim, decoder_dim),
+        # )
+        self.proj_local = nn.Sequential(
+            nn.Linear(embed_dim, 1024), # decoder_dim = 768
+            nn.LayerNorm(1024),
+            nn.GELU(),
+            nn.Linear(1024, 512),
+        )
+
+        # ========== Optional Attention Pooling ==========
+        if pooling == "attention":
+            self.att_pool = nn.MultiheadAttention(
+                embed_dim=embed_dim, num_heads=8, batch_first=True
+            )
+
+        # ========== EMA Teacher ==========
+        self.teacher_backbone = copy.deepcopy(self.backbone)
+        self.teacher_proj_global = copy.deepcopy(self.proj_global)
+        self.teacher_proj_local = copy.deepcopy(self.proj_local)
+
+        for p in (
+            list(self.teacher_backbone.parameters())
+            + list(self.teacher_proj_global.parameters())
+            + list(self.teacher_proj_local.parameters())
+        ):
+            p.requires_grad = False
+
+
+    # ---------------- Encoder ----------------
+    def forward_encoder(self, images, idx_keep=None, idx_mask=None):
+        if self.mode == "reconstruction":
+          x_encoded = self.backbone.encode(images=images, idx_keep=idx_keep)
+        elif self.mode == "embedding":
+          x_encoded = self.backbone.encode(images=images, idx_keep=None, idx_mask=idx_mask)
+
+        cls_token = x_encoded[:, 0]
+
+        if self.mode == "embedding": # output patches included visable tokens + masked tokens
+          visable_tokens = get_at_index(x_encoded, idx_keep)
+          masked_tokens = get_at_index(x_encoded, idx_mask) # masked tokens
+        elif self.mode == "reconstruction":
+          visable_tokens = x_encoded[:, 1:]
+
+        patch_tokens = x_encoded[:, 1:]
+          
+        if self.pooling == "mean":
+            pooled = visable_tokens.mean(dim=1) # global contrastive 
+
+        #patch_tokens = patch_tokens.mean(dim=1)
+
+        return x_encoded, cls_token, pooled, patch_tokens
+    
+    def forward_encoder_teacher(self, images, idx_keep=None, idx_mask=None):
+        if self.mode == "reconstruction":
+          x_encoded = self.teacher_backbone.encode(images=images, idx_keep=idx_keep)
+        elif self.mode == "embedding":
+          x_encoded = self.teacher_backbone.encode(images=images, idx_keep=None)
+
+        cls_token = x_encoded[:, 0]
+        patch_tokens = x_encoded[:, 1:]
+
+        if self.pooling == "mean":
+            pooled = patch_tokens.mean(dim=1) # global contrastive 
+
+        #patch_tokens = patch_tokens.mean(dim=1)
+
+        return x_encoded, cls_token, pooled, patch_tokens
+
+    # ---------------- Decoder ----------------
+    def forward_decoder(self, x_encoded, idx_keep, idx_mask):
+        # build decoder input
+        batch_size = x_encoded.shape[0]
+        x_decode = self.decoder.embed(x_encoded)
+        x_masked = utils.repeat_token(
+            self.decoder.mask_token, (batch_size, self.sequence_length)
+        )
+        x_masked = utils.set_at_index(x_masked, idx_keep, x_decode.type_as(x_masked))
+
+        # decoder forward pass
+        x_decoded = self.decoder.decode(x_masked)
+
+        # predict pixel values for masked tokens
+        x_pred = utils.get_at_index(x_decoded, idx_mask)
+        x_pred = self.decoder.predict(x_pred)
+        return x_pred
+
+    # ---------------- Full Forward ----------------
+    def forward(self, img_student, img_teacher=None):
+        """
+        Unified forward supporting:
+          - mode == "reconstruction": student reconstructs pixel patches for masked patches.
+          - mode == "embedding": student predicts masked patch embeddings; teacher is full-view EMA.
+        """
+        if img_teacher is None:
+            img_teacher = img_student
+
+        B = img_student.shape[0]
+        idx_keep_patches, idx_mask_patches = utils.random_token_mask(
+            size=(B, self.sequence_length),
+            mask_ratio=self.mask_ratio,
+            device=img_student.device,
+        )
+
+        # ---------- Student Forward (masked) ----------
+        x_enc_s, cls_s, pooled_s, patch_s = self.forward_encoder(img_student, idx_keep=idx_keep_patches, idx_mask=idx_mask_patches)
+        student_global = self.proj_global(pooled_s)
+        
+        if self.mode == "reconstruction":
+          x_pred_s = self.forward_decoder(x_enc_s, idx_keep=idx_keep_patches, idx_mask=idx_mask_patches)
+          N_total = patch_s.shape[1] + x_pred_s.shape[1]
+          x_pred_s = self.merge_visible_and_masked(
+              patch_vis=patch_s,
+              patch_mask=x_pred_s,
+              idx_keep=idx_keep_patches[:, 1:]-1,
+              idx_mask=idx_mask_patches[:, 1:]-1,
+              N_total=N_total
+          )
+        elif self.mode == "embedding":
+          x_pred_s = patch_s
+
+
+        # ---------- Teacher Forward (full view, no mask) ----------
+        with torch.no_grad():
+            x_enc_t, cls_t, pooled_t, patch_t = self.forward_encoder_teacher(img_teacher, idx_keep=None, idx_mask=idx_mask_patches)
+            teacher_global = self.teacher_proj_global(pooled_t)
+            teacher_local = self.teacher_proj_local(patch_t)
+
+        # ---------- Cross Alignemnt between Student and Teacher ---------
+        # Add positional embeddings
+        x_pred_s  = x_pred_s  + self.pos_map(self.backbone.vit.pos_embed[:, 1:, :])
+        patch_t = patch_t + self.teacher_backbone.vit.pos_embed[:, 1:, :]
+
+        # Cross-alignment
+        x_pred_s_refined = self.cross_align(x_pred_s, patch_t)
+        student_local = self.proj_local(x_pred_s_refined) 
+
+        return {
+                "global_s": student_global,
+                "global_t": teacher_global,
+                "local_s": student_local,
+                "local_t": teacher_local,
+                "idx_keep": idx_keep_patches,
+                "idx_mask": idx_mask_patches,
+            }
+
+    def merge_visible_and_masked(self, patch_vis, patch_mask, idx_keep, idx_mask, N_total):
+        """
+        patch_vis: [B, N_vis, D]
+        patch_mask: [B, N_mask, D]
+        idx_keep: [B, N_vis] (long)
+        idx_mask: [B, N_mask] (long)
+        N_total: tổng số patch ban đầu (H_p * W_p)
+        """
+        B, D = patch_vis.shape[0], patch_vis.shape[-1]
+        device = patch_vis.device
+        
+        # tensor chứa kết quả
+        merged = torch.zeros(B, N_total, D, device=device, dtype=patch_vis.dtype)
+        
+        # ghép visible patch vào vị trí đúng
+        merged.scatter_(1, idx_keep.unsqueeze(-1).expand(-1, -1, D), patch_vis)
+        
+        # ghép masked patch vào vị trí đúng
+        merged.scatter_(1, idx_mask.unsqueeze(-1).expand(-1, -1, D), patch_mask)
+        
+        return merged  # [B, N_total, D]
 
 import copy
 from functools import partial
