@@ -160,11 +160,12 @@ class SHAM(nn.Module):
         cls_token = x_encoded[:, 0]
 
         if self.mode == "embedding": # output patches included visable tokens + masked tokens
-            if idx_keep is not None and idx_mask is not None:
-                visable_tokens = utils.get_at_index(x_encoded, idx_keep)
-                masked_tokens = utils.get_at_index(x_encoded, idx_mask) # masked tokens
-            else:
-                visable_tokens = x_encoded[:, 1:]
+            # if idx_keep is not None and idx_mask is not None:
+            #     visable_tokens = utils.get_at_index(x_encoded, idx_keep)
+            #     masked_tokens = utils.get_at_index(x_encoded, idx_mask) # masked tokens
+            # else:
+            #     visable_tokens = x_encoded[:, 1:]
+            visable_tokens = x_encoded[:, 1:]
         elif self.mode == "reconstruction":
           visable_tokens = x_encoded[:, 1:]
 
