@@ -81,6 +81,7 @@ class SHAM(nn.Module):
         self.sequence_length = self.backbone.sequence_length
         self.patch_size = vit.patch_embed.patch_size[0]
         embed_dim = vit.embed_dim
+        self.embed_dim = embed_dim
 
         #print("=>> pos_embed: ", vit.pos_embed.shape) # [1, 197, 768]
 
@@ -100,17 +101,6 @@ class SHAM(nn.Module):
             mlp_ratio=4.0,
         )
 
-        # =========== Cross Alignment ===========
-        self.cross_align = CrossAlignBlock(embed_dim, num_heads=8)
-        self.pos_map = PosMapping(embed_dim)
-
-        # ========== Dual Projection Heads ==========
-        # self.proj_global = nn.Sequential(
-        #     nn.Linear(embed_dim, decoder_dim),
-        #     nn.LayerNorm(decoder_dim),
-        #     nn.GELU(inplace=True),
-        #     nn.Linear(decoder_dim, decoder_dim),
-        # )
         self.proj_global = nn.Sequential(
             nn.Linear(embed_dim, 1024),
             nn.LayerNorm(1024),
@@ -118,12 +108,6 @@ class SHAM(nn.Module):
             nn.Linear(1024, 256),
         )
 
-        # self.proj_local = nn.Sequential(
-        #     nn.Linear(embed_dim, decoder_dim),
-        #     nn.LayerNorm(decoder_dim),
-        #     nn.GELU(inplace=True),
-        #     nn.Linear(decoder_dim, decoder_dim),
-        # )
         self.proj_local = nn.Sequential(
             nn.Linear(embed_dim, 1024), # decoder_dim = 768
             nn.LayerNorm(1024),
@@ -158,26 +142,29 @@ class SHAM(nn.Module):
           x_encoded = self.backbone.encode(images=images, idx_keep=None, idx_mask=idx_mask)
 
         cls_token = x_encoded[:, 0]
+        
 
-        if self.mode == "embedding": # output patches included visable tokens + masked tokens
-            # if idx_keep is not None and idx_mask is not None:
-            #     visable_tokens = utils.get_at_index(x_encoded, idx_keep)
-            #     masked_tokens = utils.get_at_index(x_encoded, idx_mask) # masked tokens
-            # else:
-            #     visable_tokens = x_encoded[:, 1:]
-            visable_tokens = x_encoded[:, 1:]
+        if self.mode == "embedding": # output patches included visible tokens + masked tokens
+            if idx_keep is not None and idx_mask is not None:
+                visible_tokens = utils.get_at_index(x_encoded, idx_keep)
+                masked_tokens = utils.get_at_index(x_encoded, idx_mask) # masked tokens
+            else:
+                visible_tokens = x_encoded[:, 1:]
+            masked_patches = None
         elif self.mode == "reconstruction":
-          visable_tokens = x_encoded[:, 1:]
+          visible_tokens = x_encoded[:, 1:]
+          with torch.no_grad():
+            masked_encoded = self.teacher_backbone.encode(images=images)
+            masked_tokens = utils.get_at_index(masked_encoded, idx_mask)
+            masked_patches = masked_tokens
 
         patch_tokens = x_encoded[:, 1:]
           
         if self.pooling == "mean":
-            pooled = visable_tokens.mean(dim=1) # global contrastive 
-        #pooled=cls_token
+            pooled = visible_tokens.mean(dim=1) # global contrastive 
 
-        #patch_tokens = patch_tokens.mean(dim=1)
 
-        return x_encoded, cls_token, pooled, patch_tokens
+        return x_encoded, cls_token, pooled, patch_tokens, masked_patches
     
     def forward_encoder_teacher(self, images, idx_keep=None, idx_mask=None):
         if self.mode == "reconstruction":
@@ -190,9 +177,6 @@ class SHAM(nn.Module):
 
         if self.pooling == "mean":
             pooled = patch_tokens.mean(dim=1) # global contrastive 
-        #pooled=cls_token
-
-        #patch_tokens = patch_tokens.mean(dim=1)
 
         return x_encoded, cls_token, pooled, patch_tokens
 
@@ -207,7 +191,7 @@ class SHAM(nn.Module):
         x_masked = utils.set_at_index(x_masked, idx_keep, x_decode.type_as(x_masked))
 
         # decoder forward pass
-        x_decoded = self.decoder.decode(x_masked)
+        x_decoded = self.decoder.decode(x_masked, teacher_pos_embed=self.teacher_backbone.vit.pos_embed)
 
         # predict pixel values for masked tokens
         x_pred = utils.get_at_index(x_decoded, idx_mask)
@@ -232,22 +216,29 @@ class SHAM(nn.Module):
         )
 
         # ---------- Student Forward (masked) ----------
-        x_enc_s, cls_s, pooled_s, patch_s = self.forward_encoder(img_student, idx_keep=idx_keep_patches, idx_mask=idx_mask_patches)
+        x_enc_s, cls_s, pooled_s, patch_s, masked_patches = self.forward_encoder(img_student, idx_keep=idx_keep_patches, idx_mask=idx_mask_patches)
         student_global = self.proj_global(pooled_s)
         
         if self.mode == "reconstruction":
-          x_pred_s = self.forward_decoder(x_enc_s, idx_keep=idx_keep_patches, idx_mask=idx_mask_patches)
-          N_total = patch_s.shape[1] + x_pred_s.shape[1]
+          orig_x_pred_s = self.forward_decoder(x_enc_s, idx_keep=idx_keep_patches, idx_mask=idx_mask_patches)
+          N_total = patch_s.shape[1] + orig_x_pred_s.shape[1]
+          #print("idx_keep: ", idx_keep_patches.shape)
+          #print("idx_mask: ", idx_mask_patches.shape)
+          #print(f"min idx keep: {idx_keep_patches.min()}, max idx keep: {idx_keep_patches.max()}")
+          #print(f"min idx mask: {idx_mask_patches.min()}, max idx mask: {idx_mask_patches.max()}")  
           x_pred_s = self.merge_visible_and_masked(
-              patch_vis=patch_s,
-              patch_mask=x_pred_s,
+              patch_vis=patch_s ,
+              patch_mask=orig_x_pred_s,
               idx_keep=idx_keep_patches[:, 1:]-1,
-              idx_mask=idx_mask_patches[:, 1:]-1,
+              idx_mask=idx_mask_patches-1,
               N_total=N_total
           )
+
         elif self.mode == "embedding":
           x_pred_s = patch_s
 
+        student_local = self.proj_local(x_pred_s) 
+        
 
         # ---------- Teacher Forward (full view, no mask) ----------
         with torch.no_grad():
@@ -255,27 +246,19 @@ class SHAM(nn.Module):
             teacher_global = self.teacher_proj_global(pooled_t)
             teacher_local = self.teacher_proj_local(patch_t)
 
-        # ---------- Cross Alignemnt between Student and Teacher ---------
-        # Add positional embeddings
-        #x_pred_s  = x_pred_s  + self.pos_map(self.backbone.vit.pos_embed[:, 1:, :])
-        #patch_t = patch_t + self.teacher_backbone.vit.pos_embed[:, 1:, :]
-
-        # Cross-alignment
-        #x_pred_s_refined = self.cross_align(x_pred_s, patch_t)
-        student_local = self.proj_local(x_pred_s) 
-
         return {
                 "global_s": student_global,
                 "global_t": teacher_global,
                 "local_s": student_local,
                 "local_t": teacher_local,
+                "masked_patches_t": masked_patches.flatten(start_dim=1),
+                "masked_patches_s": orig_x_pred_s.flatten(start_dim=1),
                 "idx_keep": idx_keep_patches,
                 "idx_mask": idx_mask_patches,
             }
     
     def extract_features(self, images):
         x_encoded, cls_token, pooled, patch_tokens = self.forward_encoder(images)
-        print("=>> pooled: ", pooled.shape)
         return pooled
 
     def merge_visible_and_masked(self, patch_vis, patch_mask, idx_keep, idx_mask, N_total):
@@ -288,6 +271,10 @@ class SHAM(nn.Module):
         """
         B, D = patch_vis.shape[0], patch_vis.shape[-1]
         device = patch_vis.device
+
+        #print(f"Merging {idx_keep.shape[1] + idx_mask.shape[1]} tokens")
+        #print(f"min idx keep: {idx_keep.min()}, max idx keep: {idx_keep.max()}")
+        #print(f"min idx mask: {idx_mask.min()}, max idx mask: {idx_mask.max()}")
         
         # tensor chứa kết quả
         merged = torch.zeros(B, N_total, D, device=device, dtype=patch_vis.dtype)
@@ -299,6 +286,7 @@ class SHAM(nn.Module):
         merged.scatter_(1, idx_mask.unsqueeze(-1).expand(-1, -1, D), patch_mask)
         
         return merged  # [B, N_total, D]
+
     
 
 import math
@@ -990,7 +978,7 @@ class MAEDecoderTIMM(Module):
         out: Tensor = self.decoder_embed(input)
         return out
 
-    def decode(self, input: Tensor) -> Tensor:
+    def decode(self, input: Tensor, teacher_pos_embed: Optional[Tensor]) -> Tensor:
         """Forward pass through the decoder transformer.
 
         Args:
@@ -1003,7 +991,10 @@ class MAEDecoderTIMM(Module):
             the decoded tokens.
 
         """
-        output: Tensor = input + self.decoder_pos_embed
+        #output: Tensor = input + self.decoder_pos_embed
+        #print(f"teacher pos embed in decoder: ", teacher_pos_embed.shape)
+        #print(f"Input for decode: ", input.shape)
+        output: Tensor = input + teacher_pos_embed
         output = self.decoder_blocks(output)
         output = self.decoder_norm(output)
         return output

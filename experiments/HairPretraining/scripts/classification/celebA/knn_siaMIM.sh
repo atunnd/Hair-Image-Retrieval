@@ -7,10 +7,10 @@ python knn_classification.py \
   --img_dir /mnt/mmlab2024nas/thanhnd_student/QuocAnh/FCIR/Baselines/Composed-Image-Retrieval/experiments/HairClassification/data/hair_regions/train/dummy_class \
   --mode siaMIM \
   --model vit_b_16 \
-  --checkpoint_path /mnt/mmlab2024nas/thanhnd_student/QuocAnh/FCIR/Baselines/Composed-Image-Retrieval/hair_representation/Siamese-Image-Modeling/output_dir/sim/checkpoint-299.pth \
+  --checkpoint_path /mnt/mmlab2024nas/thanhnd_student/QuocAnh/FCIR/Baselines/Composed-Image-Retrieval/hair_representation/Siamese-Image-Modeling/output_dir/sim/checkpoint-99.pth \
   --seed 42 \
   --num_workers 8 \
-  --device cuda \
+  --device cpu \
   --batch_size 256 \
   --eval_type linear_prob
 

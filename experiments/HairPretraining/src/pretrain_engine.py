@@ -72,6 +72,7 @@ class Trainer:
         elif self.mode == "SHAM":
             self.criterion1 = NTXentLoss(temperature=args.temp)
             self.criterion2 = PatchContrastiveLoss(temperature=args.temp)
+            self.criterion3 = nn.MSELoss()
         
         # optimizer configuration
         self.optimizer = get_optimizer(self.model, self.lr, self.weight_decay, self.beta1, self.beta2)
@@ -358,6 +359,7 @@ class Trainer:
         running_loss_total = 0.0
         running_loss_global = 0.0
         running_loss_local = 0.0
+        running_loss_semantic_alignment =0.0
 
         for batch_id, batch in enumerate(tqdm(self.train_loader, desc="Training with negative samples")):
             self.optimizer.zero_grad()
@@ -373,15 +375,18 @@ class Trainer:
                 x_strong = images['strong'].to(self.device) # student input
                 
                 res = self.model(img_student=x_strong, img_teacher=x_weak)
-                global_s, global_t, local_s, local_t = res['global_s'], res['global_t'], res['local_s'], res['local_t']
+                global_s, global_t, local_s, local_t  = res['global_s'], res['global_t'], res['local_s'], res['local_t']
+                masked_patches_t, masked_patches_s = res["masked_patches_t"], res["masked_patches_s"]
                 
                 global_loss = self.criterion1(global_s, global_t)
                 local_loss = self.criterion2(local_s, local_t)
-                total_loss = global_loss + 0.5*local_loss
+                semantic_alignment_loss = self.criterion3(masked_patches_t, masked_patches_s)
+                total_loss = global_loss + 0.5*local_loss + 0.2 * semantic_alignment_loss
             
             running_loss_total += global_loss.item()
             running_loss_global += local_loss.item()
             running_loss_local += total_loss.item()
+            running_loss_semantic_alignment += semantic_alignment_loss .item()
             
             #total_loss.backward()
             #self.optimizer.step()
@@ -403,9 +408,9 @@ class Trainer:
         )
 
         with open(self.log_file, 'a') as f:
-            f.write(f"\nEpoch {epoch}: Total Loss = {running_loss_total/len(self.train_loader):.6f}, Global Loss = {running_loss_global/len(self.train_loader):.6f}, Local Loss = {running_loss_local/len(self.train_loader):.6f}\n")
+            f.write(f"\nEpoch {epoch}: Total Loss = {running_loss_total/len(self.train_loader):.6f}, Global Loss = {running_loss_global/len(self.train_loader):.6f}, Local Loss = {running_loss_local/len(self.train_loader):.6f}, Semantic_alignment Loss: {running_loss_semantic_alignment/len(self.train_loader):.6f}\n")
 
-        return running_loss_total/len(self.train_loader), running_loss_global/len(self.train_loader), running_loss_local/len(self.train_loader)
+        return running_loss_total/len(self.train_loader), running_loss_global/len(self.train_loader), running_loss_local/len(self.train_loader), running_loss_semantic_alignment/len(self.train_loader)
     
     def train(self):
         if self.mode == "mae":
@@ -426,8 +431,8 @@ class Trainer:
         for epoch in range(self.start_epoch, self.epochs):
             print(f"Epoch {epoch}/{self.epochs}")
             if self.mode=="SHAM":
-                total_loss, global_loss, local_loss = train_one_epoch(epoch=epoch, momentum_val=self.momentum_ema, scaler=scaler)
-                print(f"Total train loss: {total_loss:.6f}, Global loss: {global_loss:.6f}, Local loss: {local_loss:.6f}")
+                total_loss, global_loss, local_loss, semantic_alignment_loss = train_one_epoch(epoch=epoch, momentum_val=self.momentum_ema, scaler=scaler)
+                print(f"Total train loss: {total_loss:.6f}, Global loss: {global_loss:.6f}, Local loss: {local_loss:.6f}, Semantic_alignment_loss: {semantic_alignment_loss}")
             else:
                 train_loss = train_one_epoch(epoch=epoch, alpha=0, scaler=scaler)
                 print(f"Train loss: {train_loss:.4f}")
@@ -437,13 +442,29 @@ class Trainer:
                     'epoch': epoch,
                     'model_state_dict': self.model.state_dict(),
                     'optimizer_state_dict': self.optimizer.state_dict(),
+                    'scaler_state_dict': scaler.state_dict(),
                     'args': self.args,
                     "total_loss": total_loss,
                     'global_loss': global_loss,
-                    'local_loss': local_loss
+                    'local_loss': local_loss,
+                    'semantic_alignment_loss': semantic_alignment_loss
                 }
                 torch.save(checkpoint, file_name)
                 print(f"✅ Saved checkpoint at epoch {epoch} -> {file_name}")
+            file_name = os.path.join(self.save_path, f"model_ckpt_latest.pth")
+            checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': self.model.state_dict(),
+                'optimizer_state_dict': self.optimizer.state_dict(),
+                'scaler_state_dict': scaler.state_dict(),
+                'args': self.args,
+                "total_loss": total_loss,
+                'global_loss': global_loss,
+                'local_loss': local_loss,
+                'semantic_alignment_loss': semantic_alignment_loss
+            }
+            torch.save(checkpoint, file_name)
+            print(f"✅ Saved checkpoint at epoch {epoch} -> {file_name}")
 
         self.writer.close()  # Giải phóng resource
             
