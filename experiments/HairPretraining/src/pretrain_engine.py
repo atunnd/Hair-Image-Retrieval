@@ -72,7 +72,19 @@ class Trainer:
         elif self.mode == "SHAM":
             self.criterion1 = NTXentLoss(temperature=args.temp)
             self.criterion2 = PatchContrastiveLoss(temperature=args.temp)
-            self.criterion3 = nn.MSELoss()
+            def consistency_loss(a, b, eps=1e-8, reduction='mean'):
+                # normalize theo chiều cuối
+                a_norm = F.normalize(a, dim=-1, eps=eps)
+                b_norm = F.normalize(b, dim=-1, eps=eps)
+                loss = 1 - (a_norm * b_norm).sum(dim=-1)
+                
+                if reduction == 'mean':
+                    return loss.mean()
+                elif reduction == 'sum':
+                    return loss.sum()
+                else:
+                    return loss
+            self.criterion3 = consistency_loss
         
         # optimizer configuration
         self.optimizer = get_optimizer(self.model, self.lr, self.weight_decay, self.beta1, self.beta2)
@@ -381,12 +393,12 @@ class Trainer:
                 global_loss = self.criterion1(global_s, global_t)
                 local_loss = self.criterion2(local_s, local_t)
                 semantic_alignment_loss = self.criterion3(masked_patches_t, masked_patches_s)
-                total_loss = global_loss + 0.5*local_loss + 0.2 * semantic_alignment_loss
+                total_loss = global_loss + 0.3*local_loss + 0.1 * semantic_alignment_loss
             
-            running_loss_total += global_loss.item()
-            running_loss_global += local_loss.item()
-            running_loss_local += total_loss.item()
-            running_loss_semantic_alignment += semantic_alignment_loss .item()
+            running_loss_global += global_loss.item()
+            running_loss_local += local_loss.item()
+            running_loss_total += total_loss.item()
+            running_loss_semantic_alignment += semantic_alignment_loss.item()
             
             #total_loss.backward()
             #self.optimizer.step()
