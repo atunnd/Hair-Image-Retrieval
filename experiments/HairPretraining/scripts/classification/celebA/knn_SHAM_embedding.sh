@@ -7,7 +7,7 @@ python knn_classification.py \
   --img_dir /mnt/mmlab2024nas/thanhnd_student/QuocAnh/FCIR/Baselines/Composed-Image-Retrieval/experiments/HairClassification/data/hair_regions/train/dummy_class \
   --mode SHAM \
   --model vit_b_16 \
-  --checkpoint_path /mnt/mmlab2024nas/thanhnd_student/QuocAnh/FCIR/Baselines/Composed-Image-Retrieval/experiments/HairPretraining/output_dir/SHAM_vit_b_16_embedding/model_ckpt_79.pth \
+  --checkpoint_path /mnt/mmlab2024nas/thanhnd_student/QuocAnh/FCIR/Baselines/Composed-Image-Retrieval/experiments/HairPretraining/output_dir/SHAM_vit_b_16_embedding/model_ckpt_199.pth \
   --seed 42 \
   --num_workers 8 \
   --device cuda \

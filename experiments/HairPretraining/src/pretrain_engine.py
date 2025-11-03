@@ -8,10 +8,10 @@ import math
 
 import lightly
 from lightly.loss import NTXentLoss
-from utils.utils import get_optimizer, linear_increase_alpha, margin_decay, mse_alignment_loss, get_latest_checkpoint
+from utils.utils import get_optimizer, linear_increase_alpha, margin_decay, mse_alignment_loss, get_latest_checkpoint, sample_random_hard_negatives
 from utils.transform import positive_transform, negative_transform, PositiveMaskingTransform
 
-from utils.losses import PatchContrastiveLoss 
+from utils.losses import positive_consistency_loss_margin, bidirectional_margin_loss, nt_xent_1anchor_2positive
 
 #from utils.losses import DINOLoss, IBOTPatchLoss
 from .neg_sampling import NegSamplerClasses, NegSamplerRandomly, NegSamplerNN, NegSamplerStatic
@@ -28,6 +28,9 @@ from lightly.models.utils import (
 )
 from lightly.utils.scheduler import cosine_schedule, linear_warmup_schedule
 import random
+
+import faiss
+import numpy as np
 
 class Trainer:
     def __init__(self, model, train_loader, val_loader, args):
@@ -50,6 +53,12 @@ class Trainer:
         # choosing mode
         self.mode = args.mode
         self.momentum_ema = args.ema
+        self.scaler = torch.cuda.amp.GradScaler() 
+        
+        # memory for hard negative
+        self.hard_negative_memory = []
+        self.warm_up_epochs = args.warm_up_epochs
+        self.sampling_frequency = args.sampling_frequency
 
 
         ##########################################
@@ -70,21 +79,10 @@ class Trainer:
         elif self.mode == "simMIM":
             self.criterion = nn.L1Loss()
         elif self.mode == "SHAM":
-            self.criterion1 = NTXentLoss(temperature=args.temp)
-            self.criterion2 = PatchContrastiveLoss(temperature=args.temp)
-            def consistency_loss(a, b, eps=1e-8, reduction='mean'):
-                # normalize theo chiều cuối
-                a_norm = F.normalize(a, dim=-1, eps=eps)
-                b_norm = F.normalize(b, dim=-1, eps=eps)
-                loss = 1 - (a_norm * b_norm).sum(dim=-1)
-                
-                if reduction == 'mean':
-                    return loss.mean()
-                elif reduction == 'sum':
-                    return loss.sum()
-                else:
-                    return loss
-            self.criterion3 = consistency_loss
+            self.criterion1 = nt_xent_1anchor_2positive
+            self.criterion2 = positive_consistency_loss_margin
+            self.criterion3 = bidirectional_margin_loss
+            self.criterion4 = nn.MSELoss()
         
         # optimizer configuration
         self.optimizer = get_optimizer(self.model, self.lr, self.weight_decay, self.beta1, self.beta2)
@@ -98,7 +96,7 @@ class Trainer:
         if self.args.continue_training:
             try:
                 latest_ckpt_path = get_latest_checkpoint(args.checkpoint_folder)
-                checkpoint = torch.load(latest_ckpt_path, map_location=self.device)
+                checkpoint = torch.load(latest_ckpt_path, map_location=self.device, weights_only=False)
                 self.save_path = args.checkpoint_folder
                 print(f"✅ Found checkpoint: {latest_ckpt_path}")
             except (FileNotFoundError, TypeError):
@@ -108,6 +106,9 @@ class Trainer:
             else:
                 # Load model weights
                 self.model.load_state_dict(checkpoint['model_state_dict'])
+
+                # Load scaler
+                self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
 
                 # Khởi tạo optimizer mới khớp với model hiện tại
                 self.optimizer = get_optimizer(
@@ -366,12 +367,82 @@ class Trainer:
         
         return running_loss/len(self.train_loader)
     
+    # -----------------------------
+    # Step 1. Estimate K by PCA (SCAN-style)
+    # -----------------------------
+    def estimate_K_by_PCA(self, X: torch.Tensor, explained_var_threshold=0.9, scale_factor=2.0, max_K=2000):
+        """Ước lượng số cụm K bằng PCA cumulative variance ratio"""
+        X_np = X.detach().cpu().numpy().astype('float32')
+        N, D = X_np.shape
+        n_components = min(D, N - 1)
+        pca = faiss.PCAMatrix(D, n_components)
+        pca.train(X_np)
+        eigenvalues = faiss.vector_to_array(pca.eigenvalues).astype('float32')
+        explained_ratio = eigenvalues / np.sum(eigenvalues)
+        cumulative_ratio = np.cumsum(explained_ratio)
+        m_star = np.searchsorted(cumulative_ratio, explained_var_threshold) + 1
+        K_est = int(np.clip(scale_factor * m_star, 5, min(max_K, N - 1)))
+        return K_est, m_star
+
+
+    # -----------------------------
+    # Step 2. K-Means clustering
+    # -----------------------------
+    def run_kmeans(self, X: torch.Tensor, K: int):
+        """Chạy K-means bằng FAISS, trả về centroids tensor"""
+        X_np = X.detach().cpu().numpy().astype('float32')
+        D = X_np.shape[1]
+        use_gpu = faiss.get_num_gpus() > 0
+        kmeans = faiss.Kmeans(d=D, k=K, niter=50, gpu=use_gpu, verbose=True)
+        kmeans.train(X_np)
+        centroids = torch.from_numpy(kmeans.centroids).to(X.device)
+        return centroids, kmeans
+
+
+    # -----------------------------
+    # Step 3. Hard negative mining (cluster-based)
+    # -----------------------------
+    def mine_hard_negatives(self, anchor: torch.Tensor, centroids: torch.Tensor, kmeans):
+        """
+        Chọn hard negatives cho từng anchor bằng cách:
+        - tìm 2 centroids gần nhất
+        - dùng centroid thứ 2 (neighbor) để tìm các mẫu gần nó nhất
+        """
+        device = anchor.device
+        N, D = anchor.shape
+
+        # --- 1. Tìm 2 centroid gần nhất ---
+        D_c, I_c = kmeans.index.search(anchor.detach().cpu().numpy().astype('float32'), 2)
+        neighbor_centroid_ids = torch.from_numpy(I_c[:, 1]).long().to(device)  # (N,)
+
+        # --- 2. Build FAISS index từ các sample ---
+        index = faiss.IndexFlatL2(D)
+        index.add(anchor.detach().cpu().numpy().astype('float32'))
+
+        # --- 3. Tìm top-k sample gần từng centroid ---
+        topk = 5
+        D_samp, I_samp = index.search(centroids.detach().cpu().numpy().astype('float32'), topk)
+        I_samp = torch.from_numpy(I_samp).long().to(device)  # (K, topk)
+
+        # --- 4. Chọn hard negative cho từng anchor ---
+        rand_offsets = torch.randint(0, topk, (N,), device=device)
+        hard_neg_ids = I_samp[neighbor_centroid_ids, rand_offsets]
+
+        # Tránh chọn chính anchor → thay bằng phần tử thứ 0 nếu trùng
+        same_mask = hard_neg_ids == torch.arange(N, device=device)
+        hard_neg_ids[same_mask] = I_samp[neighbor_centroid_ids[same_mask], 0]
+
+        # --- 5. Lấy embeddings ---
+        hard_negatives = anchor[hard_neg_ids]
+        return hard_negatives
+    
     def train_one_epoch_SHAM(self, epoch=0, momentum_val=0.99, scaler=None):
         self.model.train()
         running_loss_total = 0.0
-        running_loss_global = 0.0
-        running_loss_local = 0.0
-        running_loss_semantic_alignment =0.0
+        running_loss_contrastive = 0.0
+        running_loss_pos_pos = 0.0
+        running_loss_margin = 0.0
+        running_loss_reconstruction =0.0
 
         for batch_id, batch in enumerate(tqdm(self.train_loader, desc="Training with negative samples")):
             self.optimizer.zero_grad()
@@ -383,22 +454,40 @@ class Trainer:
             update_momentum(self.model.proj_local, self.model.teacher_proj_local, m=current_m)
             
             with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
-                x_weak = images['weak'].to(self.device) # teacher input
-                x_strong = images['strong'].to(self.device) # student input
+                x_anchor = images['anchor'].to(self.device)
+                x_pos_1 = images['pos1'].to(self.device) 
+                x_pos_2 = images['pos2'].to(self.device)
                 
-                res = self.model(img_student=x_strong, img_teacher=x_weak)
-                global_s, global_t, local_s, local_t  = res['global_s'], res['global_t'], res['local_s'], res['local_t']
-                masked_patches_t, masked_patches_s = res["masked_patches_t"], res["masked_patches_s"]
+                res = self.model(img_anchor=x_anchor, img_pos1=x_pos_1, img_pos2=x_pos_2)
+                embedding_anchor, embedding_pos1, embedding_pos2, masked_prediction, masked_GT = res['anchor'], res['pos1'], res['pos2'], res['masked_prediction'], res['masked_GT']
                 
-                global_loss = self.criterion1(global_s, global_t)
-                local_loss = self.criterion2(local_s, local_t)
-                semantic_alignment_loss = self.criterion3(masked_patches_t, masked_patches_s)
-                total_loss = global_loss + 0.3*local_loss + 0.1 * semantic_alignment_loss
+                if (epoch + 1) >= self.warm_up_epochs:
+                    embedding_hard_negative = sample_random_hard_negatives(embedding_anchor)
+                    self.hard_negative_memory = embedding_hard_negative
+                else:
+                    if (epoch+1 - self.warm_up_epochs) % self.sampling_frequency == 0:
+                        K, m_star = self.estimate_K_by_PCA(embedding_anchor)
+                        centroids, kmeans = self.run_kmeans(embedding_anchor, K)
+                        embedding_hard_negative = self.mine_hard_negatives(embedding_anchor, centroids, kmeans)
+                        self.hard_negative_memory = embedding_hard_negative
+                        print(f"Estimated K = {K} (m* = {m_star})")
+                    else:
+                        embedding_hard_negative = self.hard_negative_memory
+                
+                embedding_pos = torch.concat([embedding_pos1, embedding_pos2.detach()], dim=0)
+                
+                contrastive_loss = self.criterion1(embedding_anchor, embedding_pos) # contrastive loss
+                pos_consistency_loss = self.criterion2(embedding_pos1, embedding_pos2) # Positive–positive consistency loss
+                bidirectional_margin_loss = self.criterion3(embedding_anchor, embedding_pos1, embedding_pos2, embedding_hard_negative) 
+                reconstruction_loss = self.criterion4(masked_prediction, masked_GT) 
+                
+                total_loss = 0.5*contrastive_loss + 0.5*reconstruction_loss + 0.3*bidirectional_margin_loss + 0.1*pos_consistency_loss
             
-            running_loss_global += global_loss.item()
-            running_loss_local += local_loss.item()
             running_loss_total += total_loss.item()
-            running_loss_semantic_alignment += semantic_alignment_loss.item()
+            running_loss_contrastive += contrastive_loss.item()
+            running_loss_pos_pos += pos_consistency_loss.item()
+            running_loss_margin += bidirectional_margin_loss.item()
+            running_loss_reconstruction += reconstruction_loss.item()
             
             #total_loss.backward()
             #self.optimizer.step()
@@ -413,16 +502,14 @@ class Trainer:
             'Loss/Avg_per_Epoch',  # Nhóm dưới tag này để dễ xem theo epoch
             {
                 'total_loss': running_loss_total/len(self.train_loader),
-                'global_loss': running_loss_global/len(self.train_loader),
-                'local_loss': running_loss_local/len(self.train_loader)
             },
             global_step=epoch  # Sử dụng epoch trực tiếp làm step cho log epoch-level
         )
 
         with open(self.log_file, 'a') as f:
-            f.write(f"\nEpoch {epoch}: Total Loss = {running_loss_total/len(self.train_loader):.6f}, Global Loss = {running_loss_global/len(self.train_loader):.6f}, Local Loss = {running_loss_local/len(self.train_loader):.6f}, Semantic_alignment Loss: {running_loss_semantic_alignment/len(self.train_loader):.6f}\n")
+            f.write(f"\nEpoch {epoch}: Total Loss = {running_loss_total/len(self.train_loader):.6f}, Contrastive Loss = {running_loss_contrastive/len(self.train_loader):.6f}, Pos-pos Loss = {running_loss_pos_pos/len(self.train_loader):.6f}, Bi-margin Loss = {running_loss_margin/len(self.train_loader):.6f}, Reconstruction loss = {running_loss_reconstruction/len(self.train_loader):.6f}\n")
 
-        return running_loss_total/len(self.train_loader), running_loss_global/len(self.train_loader), running_loss_local/len(self.train_loader), running_loss_semantic_alignment/len(self.train_loader)
+        return running_loss_total/len(self.train_loader), running_loss_contrastive/len(self.train_loader), running_loss_pos_pos/len(self.train_loader), running_loss_margin/len(self.train_loader), running_loss_reconstruction/len(self.train_loader)
     
     def train(self):
         if self.mode == "mae":
@@ -438,28 +525,28 @@ class Trainer:
         elif self.mode == "SHAM":
             train_one_epoch = self.train_one_epoch_SHAM
 
-        scaler = torch.cuda.amp.GradScaler() 
 
         for epoch in range(self.start_epoch, self.epochs):
             print(f"Epoch {epoch}/{self.epochs}")
             if self.mode=="SHAM":
-                total_loss, global_loss, local_loss, semantic_alignment_loss = train_one_epoch(epoch=epoch, momentum_val=self.momentum_ema, scaler=scaler)
-                print(f"Total train loss: {total_loss:.6f}, Global loss: {global_loss:.6f}, Local loss: {local_loss:.6f}, Semantic_alignment_loss: {semantic_alignment_loss}")
+                total_loss, contrastive_loss, pos_pos_loss, bi_margin_loss, reconstruction_loss = train_one_epoch(epoch=epoch, momentum_val=self.momentum_ema, scaler=self.scaler)
+                print(f"Total train loss: {total_loss:.6f}, Contrastive Loss: {contrastive_loss:.6f}, Pos-pos Loss: {pos_pos_loss:.6f}, Bi-margin Loss: {bi_margin_loss:.6f}, Reconstruction Loss: {reconstruction_loss:.6f}")
             else:
-                train_loss = train_one_epoch(epoch=epoch, alpha=0, scaler=scaler)
+                train_loss = train_one_epoch(epoch=epoch, alpha=0, scaler=self.scaler)
                 print(f"Train loss: {train_loss:.4f}")
-            if (epoch+1) % 20 == 0:
+            if (epoch+1) % 50 == 0:
                 file_name = os.path.join(self.save_path, f"model_ckpt_{epoch}.pth")
                 checkpoint = {
                     'epoch': epoch,
                     'model_state_dict': self.model.state_dict(),
                     'optimizer_state_dict': self.optimizer.state_dict(),
-                    'scaler_state_dict': scaler.state_dict(),
+                    'scaler_state_dict': self.scaler.state_dict(),
                     'args': self.args,
-                    "total_loss": total_loss,
-                    'global_loss': global_loss,
-                    'local_loss': local_loss,
-                    'semantic_alignment_loss': semantic_alignment_loss
+                    "Total_loss": total_loss,
+                    'Contrastive Loss': contrastive_loss,
+                    'Pos-pos loss': pos_pos_loss,
+                    'Bi-margin loss': bi_margin_loss,
+                    'Reconstruction loss': reconstruction_loss
                 }
                 torch.save(checkpoint, file_name)
                 print(f"✅ Saved checkpoint at epoch {epoch} -> {file_name}")
@@ -468,12 +555,13 @@ class Trainer:
                 'epoch': epoch,
                 'model_state_dict': self.model.state_dict(),
                 'optimizer_state_dict': self.optimizer.state_dict(),
-                'scaler_state_dict': scaler.state_dict(),
+                'scaler_state_dict': self.scaler.state_dict(),
                 'args': self.args,
-                "total_loss": total_loss,
-                'global_loss': global_loss,
-                'local_loss': local_loss,
-                'semantic_alignment_loss': semantic_alignment_loss
+                "Total_loss": total_loss,
+                'Contrastive Loss': contrastive_loss,
+                'Pos-pos loss': pos_pos_loss,
+                'Bi-margin loss': bi_margin_loss,
+                'Reconstruction loss': reconstruction_loss
             }
             torch.save(checkpoint, file_name)
             print(f"✅ Saved checkpoint at epoch {epoch} -> {file_name}")

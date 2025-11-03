@@ -537,4 +537,97 @@ class PatchContrastiveLoss(torch.nn.Module):
             total_loss += self.loss_fn(patch_s[i], patch_t[i])
 
         return total_loss / B
+
+import torch
+import torch.nn.functional as F
+
+def positive_consistency_loss_margin(pos1, pos2, m_p=0.1, reduction='mean'):
+    """
+    Soft-margin version:
+    L_pp = log(1 + exp(m_p - cosine_similarity(p1, p2)))
+    """
+    pos1 = F.normalize(pos1, dim=1)
+    pos2 = F.normalize(pos2, dim=1)
+    sim = torch.sum(pos1 * pos2, dim=1)
+    loss = torch.log1p(torch.exp(m_p - sim))
     
+    if reduction == 'mean':
+        return loss.mean()
+    elif reduction == 'sum':
+        return loss.sum()
+    else:
+        return loss
+
+    
+import torch
+import torch.nn.functional as F
+
+def bidirectional_margin_loss(anchor, pos1, pos2, neg, m_p=0.7, m_n=0.3, reduction='mean'):
+    """
+    Bidirectional Margin Loss:
+    L_bi = log(1 + exp(m_p - s(u,p1))) 
+         + log(1 + exp(m_p - s(u,p2))) 
+         + log(1 + exp(s(u,nh) - m_n))
+    Args:
+        anchor, pos1, pos2, neg: [B, D] tensors
+        m_p, m_n: margins
+        reduction: 'mean' or 'sum' or 'none'
+    """
+    # Normalize for cosine similarity
+    anchor = F.normalize(anchor, dim=1)
+    pos1 = F.normalize(pos1, dim=1)
+    pos2 = F.normalize(pos2, dim=1)
+    neg = F.normalize(neg, dim=1)
+
+    # Cosine similarities
+    s_up1 = torch.sum(anchor * pos1, dim=1)  # s(u, p1)
+    s_up2 = torch.sum(anchor * pos2, dim=1)  # s(u, p2)
+    s_un = torch.sum(anchor * neg, dim=1)    # s(u, nh)
+
+    # Compute log(1 + exp(...))
+    term1 = torch.log1p(torch.exp(m_p - s_up1))
+    term2 = torch.log1p(torch.exp(m_p - s_up2))
+    term3 = torch.log1p(torch.exp(s_un - m_n))
+
+    loss = term1 + term2 + term3
+
+    if reduction == 'mean':
+        return loss.mean()
+    elif reduction == 'sum':
+        return loss.sum()
+    else:
+        return loss
+
+import torch
+import torch.nn.functional as F
+
+def nt_xent_1anchor_2positive(u, p1, p2, tau=0.5):
+    """
+    NT-Xent loss with 1 anchor and 2 positives
+
+    Args:
+        u: [N, C] normalized anchor embeddings
+        p1: [N, C] normalized positive 1 embeddings
+        p2: [N, C] normalized positive 2 embeddings
+        tau: temperature coefficient
+    Returns:
+        scalar loss
+    """
+    # ------- Positive term -------
+    # cosine similarity between anchor and positives
+    sim_u_p1 = (u * p1.detach()).sum(dim=-1)  # [N]
+    sim_u_p2 = (u * p2.detach()).sum(dim=-1)  # [N]
+    loss_pos = -(sim_u_p1 + sim_u_p2) / 2  # average over two positives
+
+    # ------- Negative term -------
+    # compute similarity between anchor and all positives in batch
+    # concatenate p1 and p2 to treat all as potential negatives
+    all_pos = torch.cat([p1, p2], dim=0)  # [2N, C]
+    sim_matrix = u @ all_pos.T  # [N, 2N]
+    weight = F.softmax(sim_matrix / tau, dim=-1)  # softmax over all positives
+    # negative contribution
+    loss_neg = (weight @ all_pos.detach() * u).sum(dim=-1)  # [N]
+
+    # ------- Total loss -------
+    loss = (loss_pos + loss_neg / tau).mean()
+    return loss

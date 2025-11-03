@@ -9,43 +9,29 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class CrossAlignBlock(nn.Module):
-    """
-    Cross-Attention Alignment Block:
-    Student embeddings attend to Teacher embeddings.
-    """
-    def __init__(self, dim, num_heads=8, mlp_ratio=4.0):
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class ProjectionHead(nn.Module):
+    def __init__(self, input_dim=512, hidden_dim=2048, output_dim=128, use_bn=True):
         super().__init__()
-        self.cross_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
-        self.norm1 = nn.LayerNorm(dim)
-        self.norm2 = nn.LayerNorm(dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, int(dim * mlp_ratio)),
-            nn.GELU(),
-            nn.Linear(int(dim * mlp_ratio), dim),
-        )
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.bn1 = nn.BatchNorm1d(hidden_dim) if use_bn else nn.Identity()
+        self.relu = nn.ReLU(inplace=True)
+        self.fc2 = nn.Linear(hidden_dim, output_dim)
+        self.bn2 = nn.BatchNorm1d(output_dim) if use_bn else nn.Identity()
 
-    def forward(self, E_s, E_t):
-        # Cross-attention: Q = student, K/V = teacher
-        attn_out, _ = self.cross_attn(
-            query=E_s, key=E_t, value=E_t
-        )
-        E_s = self.norm1(E_s + attn_out)  # residual + norm
-        E_s = self.norm2(E_s + self.mlp(E_s))  # feed-forward
-        return E_s
-
-class PosMapping(nn.Module):
-    """Learnable mapping from student PE → teacher PE space."""
-    def __init__(self, dim):
-        super().__init__()
-        self.fc = nn.Sequential(
-            nn.Linear(dim, dim),
-            nn.GELU(),
-            nn.Linear(dim, dim)
-        )
-
-    def forward(self, pe):
-        return self.fc(pe)
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.fc2(x)
+        x = self.bn2(x)
+        # L2 normalize for contrastive loss
+        x = F.normalize(x, dim=-1)
+        return x
 
 class SHAM(nn.Module):
     """
@@ -101,19 +87,7 @@ class SHAM(nn.Module):
             mlp_ratio=4.0,
         )
 
-        self.proj_global = nn.Sequential(
-            nn.Linear(embed_dim, 1024),
-            nn.LayerNorm(1024),
-            nn.GELU(),
-            nn.Linear(1024, 256),
-        )
-
-        self.proj_local = nn.Sequential(
-            nn.Linear(embed_dim, 1024), # decoder_dim = 768
-            nn.LayerNorm(1024),
-            nn.GELU(),
-            nn.Linear(1024, 512),
-        )
+        self.proj_head = ProjectionHead(input_dim=embed_dim)
 
         # ========== Optional Attention Pooling ==========
         if pooling == "attention":
@@ -123,62 +97,21 @@ class SHAM(nn.Module):
 
         # ========== EMA Teacher ==========
         self.teacher_backbone = copy.deepcopy(self.backbone)
-        self.teacher_proj_global = copy.deepcopy(self.proj_global)
-        self.teacher_proj_local = copy.deepcopy(self.proj_local)
+        self.teacher_proj_head = copy.deepcopy(self.proj_head)
 
         for p in (
             list(self.teacher_backbone.parameters())
-            + list(self.teacher_proj_global.parameters())
-            + list(self.teacher_proj_local.parameters())
+            + list(self.teacher_proj_head.parameters())
         ):
             p.requires_grad = False
 
 
     # ---------------- Encoder ----------------
-    def forward_encoder(self, images, idx_keep=None, idx_mask=None):
-        if self.mode == "reconstruction":
-          x_encoded = self.backbone.encode(images=images, idx_keep=idx_keep)
-        elif self.mode == "embedding":
-          x_encoded = self.backbone.encode(images=images, idx_keep=None, idx_mask=idx_mask)
-
-        cls_token = x_encoded[:, 0]
-        
-
-        if self.mode == "embedding": # output patches included visible tokens + masked tokens
-            if idx_keep is not None and idx_mask is not None:
-                visible_tokens = utils.get_at_index(x_encoded, idx_keep)
-                masked_tokens = utils.get_at_index(x_encoded, idx_mask) # masked tokens
-            else:
-                visible_tokens = x_encoded[:, 1:]
-            masked_patches = None
-        elif self.mode == "reconstruction":
-          visible_tokens = x_encoded[:, 1:]
-          with torch.no_grad():
-            masked_encoded = self.teacher_backbone.encode(images=images)
-            masked_tokens = utils.get_at_index(masked_encoded, idx_mask)
-            masked_patches = masked_tokens
-
-        patch_tokens = x_encoded[:, 1:]
-          
-        if self.pooling == "mean":
-            pooled = visible_tokens.mean(dim=1) # global contrastive 
-
-
-        return x_encoded, cls_token, pooled, patch_tokens, masked_patches
+    def forward_encoder(self, images, idx_keep=None):
+        return self.backbone.encode(images=images, idx_keep=idx_keep)
     
-    def forward_encoder_teacher(self, images, idx_keep=None, idx_mask=None):
-        if self.mode == "reconstruction":
-          x_encoded = self.teacher_backbone.encode(images=images, idx_keep=idx_keep)
-        elif self.mode == "embedding":
-          x_encoded = self.teacher_backbone.encode(images=images, idx_keep=None)
-
-        cls_token = x_encoded[:, 0]
-        patch_tokens = x_encoded[:, 1:]
-
-        if self.pooling == "mean":
-            pooled = patch_tokens.mean(dim=1) # global contrastive 
-
-        return x_encoded, cls_token, pooled, patch_tokens
+    def forward_encoder_teacher(self, images, idx_keep=None):
+        return self.teacher_backbone.encode(images=images, idx_keep=idx_keep)
 
     # ---------------- Decoder ----------------
     def forward_decoder(self, x_encoded, idx_keep, idx_mask):
@@ -191,7 +124,7 @@ class SHAM(nn.Module):
         x_masked = utils.set_at_index(x_masked, idx_keep, x_decode.type_as(x_masked))
 
         # decoder forward pass
-        x_decoded = self.decoder.decode(x_masked, teacher_pos_embed=self.teacher_backbone.vit.pos_embed)
+        x_decoded = self.decoder.decode(x_masked)
 
         # predict pixel values for masked tokens
         x_pred = utils.get_at_index(x_decoded, idx_mask)
@@ -199,94 +132,47 @@ class SHAM(nn.Module):
         return x_pred
 
     # ---------------- Full Forward ----------------
-    def forward(self, img_student, img_teacher=None):
-        """
-        Unified forward supporting:
-          - mode == "reconstruction": student reconstructs pixel patches for masked patches.
-          - mode == "embedding": student predicts masked patch embeddings; teacher is full-view EMA.
-        """
-        if img_teacher is None:
-            img_teacher = img_student
-
-        B = img_student.shape[0]
-        idx_keep_patches, idx_mask_patches = utils.random_token_mask(
-            size=(B, self.sequence_length),
+    def forward(self, img_anchor, img_pos1, img_pos2):
+        batch_size = img_anchor.shape[0]
+        idx_keep, idx_mask = utils.random_token_mask(
+            size=(batch_size, self.sequence_length),
             mask_ratio=self.mask_ratio,
-            device=img_student.device,
+            device=img_anchor.device,
         )
-
-        # ---------- Student Forward (masked) ----------
-        x_enc_s, cls_s, pooled_s, patch_s, masked_patches = self.forward_encoder(img_student, idx_keep=idx_keep_patches, idx_mask=idx_mask_patches)
-        student_global = self.proj_global(pooled_s)
         
-        if self.mode == "reconstruction":
-          orig_x_pred_s = self.forward_decoder(x_enc_s, idx_keep=idx_keep_patches, idx_mask=idx_mask_patches)
-          N_total = patch_s.shape[1] + orig_x_pred_s.shape[1]
-          #print("idx_keep: ", idx_keep_patches.shape)
-          #print("idx_mask: ", idx_mask_patches.shape)
-          #print(f"min idx keep: {idx_keep_patches.min()}, max idx keep: {idx_keep_patches.max()}")
-          #print(f"min idx mask: {idx_mask_patches.min()}, max idx mask: {idx_mask_patches.max()}")  
-          x_pred_s = self.merge_visible_and_masked(
-              patch_vis=patch_s ,
-              patch_mask=orig_x_pred_s,
-              idx_keep=idx_keep_patches[:, 1:]-1,
-              idx_mask=idx_mask_patches-1,
-              N_total=N_total
-          )
+        # ----- forward anchor ------
+        x_encoded = self.forward_encoder(images=img_anchor, idx_keep=idx_keep)
+        x_embedding, x_pred = self.forward_decoder(
+            x_encoded=x_encoded, idx_keep=idx_keep, idx_mask=idx_mask
+        )
+        anchor_embedding = self.proj_head(x_embedding[:, 1:].mean(dim=1))
 
-        elif self.mode == "embedding":
-          x_pred_s = patch_s
-
-        student_local = self.proj_local(x_pred_s) 
+        # get image patches for masked tokens
+        patches = utils.patchify(img_anchor, self.patch_size)
+        # must adjust idx_mask for missing class token
+        target = utils.get_at_index(patches, idx_mask - 1)
         
-
-        # ---------- Teacher Forward (full view, no mask) ----------
+        # ------ forward pos1 ------
+        pos_encoded_1 = self.forward_encoder(images=img_pos1, idx_keep=None)
+        pos1_embedding = self.proj_head(pos_encoded_1[:, 1:].mean(dim=1))
+        
+        # ------ forward pos2 ------
         with torch.no_grad():
-            x_enc_t, cls_t, pooled_t, patch_t = self.forward_encoder_teacher(img_teacher, idx_keep=None, idx_mask=idx_mask_patches)
-            teacher_global = self.teacher_proj_global(pooled_t)
-            teacher_local = self.teacher_proj_local(patch_t)
-
+            pos_encoded_2 = self.forward_encoder_teacher(images=img_pos1, idx_keep=None)
+            pos2_embedding = self.teacher_proj_head(pos_encoded_2[:, 1:].mean(dim=1))
+        
         return {
-                "global_s": student_global,
-                "global_t": teacher_global,
-                "local_s": student_local,
-                "local_t": teacher_local,
-                "masked_patches_t": masked_patches.flatten(start_dim=1),
-                "masked_patches_s": orig_x_pred_s.flatten(start_dim=1),
-                "idx_keep": idx_keep_patches,
-                "idx_mask": idx_mask_patches,
-            }
-    
+            "anchor": anchor_embedding,
+            "pos1": pos1_embedding,
+            "pos2": pos2_embedding,
+            'masked_prediction': x_pred,
+            'masked_GT': target
+        }
+        
     def extract_features(self, images):
-        x_encoded, cls_token, pooled, patch_tokens = self.forward_encoder(images)
-        return pooled
+        x_encoded = self.forward_encoder(images)
+        return x_encoded[:, :1].mean(dim=1)
 
-    def merge_visible_and_masked(self, patch_vis, patch_mask, idx_keep, idx_mask, N_total):
-        """
-        patch_vis: [B, N_vis, D]
-        patch_mask: [B, N_mask, D]
-        idx_keep: [B, N_vis]
-        idx_mask: [B, N_mask]
-        N_total: tổng số patch ban đầu (H_p * W_p)
-        """
-        B, D = patch_vis.shape[0], patch_vis.shape[-1]
-        device = patch_vis.device
-
-        # Ép dtype của 2 patch về cùng kiểu
-        if patch_vis.dtype != patch_mask.dtype:
-            patch_mask = patch_mask.to(patch_vis.dtype)
-
-        merged = torch.zeros(B, N_total, D, device=device, dtype=patch_vis.dtype)
-
-        # Chèn visible patches
-        merged.scatter_(1, idx_keep.unsqueeze(-1).expand(-1, -1, D), patch_vis)
-        # Chèn masked patches
-        merged.scatter_(1, idx_mask.unsqueeze(-1).expand(-1, -1, D), patch_mask)
-
-        return merged
-
-
-    
 
 import math
 from typing import List, Optional, Tuple
@@ -301,15 +187,13 @@ from torch.nn import LayerNorm, Linear, Module, Parameter
 from lightly.models import utils
 
 
-# model_args = dict(patch_size=16, embed_dim=768, depth=12, num_heads=12)
+model_args = dict(patch_size=16, embed_dim=768, depth=12, num_heads=12)
 
 from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple
 
 from torch import Tensor
 from torch.nn import Module, Parameter
-
-
 
 
 class MaskedVisionTransformer(ABC, Module):
@@ -555,7 +439,7 @@ class MaskedVisionTransformer(ABC, Module):
         Returns:
             Tensor after adding positional embeddings, with the same shape as the input.
         """
-        ...
+        
 
 
 class MaskedVisionTransformerTIMM(MaskedVisionTransformer):
@@ -601,12 +485,10 @@ class MaskedVisionTransformerTIMM(MaskedVisionTransformer):
             )
         if weight_initialization != "skip":
             self._initialize_weights()
-        
-        #print("num prefix tokens: ", self.vit.num_prefix_tokens)
 
         utils.initialize_positional_embedding(
-            pos_embedding=self.vit.pos_embed, # self.pos_embed = nn.Parameter(torch.randn(1, embed_len, embed_dim, **dd) * .02) with dd = {'device': device, 'dtype': dtype}
-            strategy=pos_embed_initialization, # sincos
+            pos_embedding=self.vit.pos_embed,
+            strategy=pos_embed_initialization,
             num_prefix_tokens=self.vit.num_prefix_tokens,
         )
 
@@ -676,72 +558,6 @@ class MaskedVisionTransformerTIMM(MaskedVisionTransformer):
         # normalize
         tokens = self.vit.norm(tokens)
         return tokens
-    
-    def preprocess(
-        self,
-        images: Tensor,
-        idx_mask: Optional[Tensor] = None,
-        idx_keep: Optional[Tensor] = None,
-        mask: Optional[Tensor] = None,
-    ) -> Tensor:
-        """Convert images to tokens, add positional embeddings, and apply masking.
-
-        Args:
-            images:
-                Tensor with shape (batch_size, channels, image_height, image_width).
-            idx_mask:
-                Tensor with shape (batch_size, num_tokens_to_mask) where each
-                entry is an index of the token to mask in the respective batch.
-                Indices must be in the range [0, sequence_length).
-                If specified, the indexed tokens are masked with self.mask_token.
-                Cannot be used in combination with mask argument.
-            idx_keep:
-                Tensor with shape (batch_size, num_tokens_to_keep) where each
-                entry is an index of the token to keep in the respective batch.
-                Indices must be in the range [0, sequence_length).
-                If set, only the indexed tokens will be returned.
-                Is applied after any masking operation.
-            mask:
-                Tensor with shape (batch_size, sequence_length) indicating which tokens
-                should be masked. Tokens where the mask is True will be masked with
-                self.mask_token.
-
-        Returns:
-            Tensor with shape (batch_size, sequence_length, embed_dim) containing the
-            preprocessed tokens. If idx_keep is set, only num_tokens_to_keep tokens
-            per sequence are returned. Any class or prefix tokens are prepended to the
-            sequence.
-        """
-        if idx_mask is not None and mask is not None:
-            raise ValueError("idx_mask and mask cannot both be set at the same time.")
-
-        # convert images to tokens
-        tokens = self.images_to_tokens(images)
-        #print("tokens after images_to_tokens: ", tokens.shape) # [3, 196, 768]
-        # add prefix tokens if needed
-        tokens = self.prepend_prefix_tokens(tokens)
-        #print("result of prepend_prefix_tokens: ", tokens.shape) # [3, 197, 768]
-
-        if idx_mask is not None:
-            #print("=> idx_mask: ", idx_mask.shape)
-            tokens = utils.mask_at_index(
-                tokens=tokens, index=idx_mask, mask_token=self.mask_token
-            )
-        elif mask is not None:
-            tokens = utils.mask_bool(
-                tokens=tokens, mask=mask, mask_token=self.mask_token
-            )
-        #print("double check: ", tokens.shape) # [3, 197, 768]
-
-        # add positional encoding
-        tokens = self.add_pos_embed(tokens, idx_mask=idx_mask)
-        #print("result of add_pos_embed: ", tokens.shape) # [3, 197, 768] 
-
-        if idx_keep is not None:
-            tokens = utils.get_at_index(tokens, idx_keep)
-            #print("after filter idx keep: ", tokens.shape) # [3, 50, 768]
-
-        return tokens
 
     def images_to_tokens(self, images: Tensor) -> Tensor:
         tokens: Tensor = self.vit.patch_embed(images)
@@ -758,15 +574,11 @@ class MaskedVisionTransformerTIMM(MaskedVisionTransformer):
             prefix_tokens.append(self.vit.reg_token.expand(x.shape[0], -1, -1))
         if prefix_tokens:
             x = torch.cat(prefix_tokens + [x], dim=1)
-        
         return x
 
-
-    def add_pos_embed(self, x: Tensor, idx_mask: Optional[Tensor] = None) -> Tensor:
+    def add_pos_embed(self, x: Tensor) -> Tensor:
         x_prefix = x[:, : self.vit.num_prefix_tokens, :]
-        #print("x_predix: ", x_prefix.shape) # [3, 1, 768]
         x = x[:, self.vit.num_prefix_tokens :, :]
-        #print("x: ", x.shape) # [3, 196, 768]
         if self.vit.dynamic_img_size:
             x = x.transpose(1, 2)  # NLC -> NCL
             total_size = torch.numel(x)
@@ -794,19 +606,15 @@ class MaskedVisionTransformerTIMM(MaskedVisionTransformer):
             x = x.view(B, -1, C)
         else:
             pos_embed = self.vit.pos_embed
-            #print("pos_embed: ", pos_embed.shape) # [1, 197, 768]
 
         if self.vit.no_embed_class:
             x = x + pos_embed
             if self.vit.num_prefix_tokens:
                 x = torch.cat((x_prefix, x), dim=1)
         else:
-            # print("num prefix tokens: ", self.vit.num_prefix_tokens) # 1
-            # print("x: ", x.shape) # [3, 196, 768]
             if self.vit.num_prefix_tokens:
                 x = torch.cat((x_prefix, x), dim=1)
             x = x + pos_embed
-
         out: Tensor = self.vit.pos_drop(x)
         return out
 
@@ -844,7 +652,6 @@ from torch.nn import LayerNorm, Module, Parameter, Sequential
 
 from lightly.models import utils
 from lightly.models.modules.masked_vision_transformer_timm import init_weights
-
 
 class MAEDecoderTIMM(Module):
     """Decoder for the Masked Autoencoder model [0].
@@ -933,12 +740,9 @@ class MAEDecoderTIMM(Module):
         )
 
         self.decoder_norm = norm_layer(decoder_embed_dim)
-        # self.decoder_pred = nn.Linear(
-        #     decoder_embed_dim, patch_size**2 * in_chans, bias=True
-        # )  # decoder to patch
         self.decoder_pred = nn.Linear(
-            decoder_embed_dim, embed_dim, bias=True
-        )  # decoder to embeddings
+            decoder_embed_dim, patch_size**2 * in_chans, bias=True
+        )  # decoder to patch
 
         if initialize_weights:
             self._initialize_weights()
@@ -955,8 +759,9 @@ class MAEDecoderTIMM(Module):
         """
 
         out = self.embed(input)
-        out = self.decode(out)
-        return self.predict(out)
+        embedding = self.decode(out)
+        prediction = self.predict(embedding)
+        return embedding, prediction
 
     def embed(self, input: Tensor) -> Tensor:
         """Embeds encoded input tokens into decoder token dimension.
@@ -977,7 +782,7 @@ class MAEDecoderTIMM(Module):
         out: Tensor = self.decoder_embed(input)
         return out
 
-    def decode(self, input: Tensor, teacher_pos_embed: Optional[Tensor]) -> Tensor:
+    def decode(self, input: Tensor) -> Tensor:
         """Forward pass through the decoder transformer.
 
         Args:
@@ -990,10 +795,7 @@ class MAEDecoderTIMM(Module):
             the decoded tokens.
 
         """
-        #output: Tensor = input + self.decoder_pos_embed
-        #print(f"teacher pos embed in decoder: ", teacher_pos_embed.shape)
-        #print(f"Input for decode: ", input.shape)
-        output: Tensor = input + teacher_pos_embed
+        output: Tensor = input + self.decoder_pos_embed
         output = self.decoder_blocks(output)
         output = self.decoder_norm(output)
         return output
@@ -1012,7 +814,6 @@ class MAEDecoderTIMM(Module):
 
         """
         out: Tensor = self.decoder_pred(input)
-
         return out
 
     def _initialize_weights(self) -> None:

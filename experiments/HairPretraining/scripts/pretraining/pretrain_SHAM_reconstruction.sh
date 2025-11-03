@@ -3,7 +3,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 python mainpretrain.py \
   --epochs 300 \
-  --batch_size 5 \
+  --batch_size 256 \
   --device cuda:0 \
   --device_id 2 \
   --save_path output_dir \

@@ -5,6 +5,34 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+import torch
+
+def sample_random_hard_negatives(anchor: torch.Tensor) -> torch.Tensor:
+    """
+    Sinh hard negatives ngẫu nhiên trong cùng batch (warm-up stage).
+
+    Args:
+        anchor (torch.Tensor): Tensor (B, D), batch embedding anchor.
+
+    Returns:
+        hard_negatives (torch.Tensor): Tensor (B, D), mỗi anchor có 1 negative khác batch.
+    """
+    B, D = anchor.shape
+    device = anchor.device
+
+    # Random shuffle chỉ số trong batch
+    perm = torch.randperm(B, device=device)
+
+    # Nếu một anchor trùng chính nó, shift 1
+    same = perm == torch.arange(B, device=device)
+    if same.any():
+        perm[same] = (perm[same] + 1) % B
+
+    # Lấy negative
+    hard_negatives = anchor[perm]
+    return hard_negatives
+
+
 def mse_alignment_loss(model, positives, masked_positives, beta=0.05):
     """
     Tính MSE loss giữa embeddings của positive và masked positive,
@@ -89,43 +117,22 @@ def update_momentum(student, teacher, m):
 import os
 import re
 
-def get_latest_checkpoint(checkpoint_dir, prefix="model_ckpt_", suffix=".pth"):
+def get_latest_checkpoint(checkpoint_dir, filename="model_ckpt_latest.pth"):
     """
-    Tìm checkpoint có số epoch lớn nhất trong thư mục.
+    Lấy checkpoint theo tên cố định (ví dụ: model_ckpt_latest.pth).
 
     Args:
         checkpoint_dir (str): Đường dẫn đến thư mục chứa checkpoint.
-        prefix (str): Tiền tố của tên file checkpoint.
-        suffix (str): Phần đuôi mở rộng của file checkpoint.
+        filename (str): Tên file checkpoint cần load.
 
     Returns:
-        str | None: Đường dẫn file checkpoint mới nhất, hoặc None nếu không có.
+        str | None: Đường dẫn file checkpoint nếu tồn tại, hoặc None nếu không có.
     """
-    checkpoint_files = [
-        f for f in os.listdir(checkpoint_dir)
-        if f.startswith(prefix) and f.endswith(suffix)
-    ]
+    checkpoint_path = os.path.join(checkpoint_dir, filename)
 
-    if not checkpoint_files:
-        print("⚪ Không tìm thấy checkpoint nào trong thư mục.")
+    if not os.path.exists(checkpoint_path):
+        print(f"⚪ Không tìm thấy checkpoint: {filename}")
         return None
 
-    # Dùng regex để lấy số epoch trong tên file
-    pattern = re.compile(rf"{prefix}(\d+){suffix}")
-    checkpoints = []
-    for f in checkpoint_files:
-        match = pattern.match(f)
-        if match:
-            epoch = int(match.group(1))
-            checkpoints.append((epoch, f))
-
-    if not checkpoints:
-        print("⚪ Không tìm thấy checkpoint hợp lệ (không có số epoch).")
-        return None
-
-    # Lấy checkpoint có epoch lớn nhất
-    latest_epoch, latest_file = max(checkpoints, key=lambda x: x[0])
-    latest_path = os.path.join(checkpoint_dir, latest_file)
-
-    print(f"✅ Checkpoint mới nhất: {latest_file} (epoch {latest_epoch})")
-    return latest_path
+    print(f"✅ Đã tìm thấy checkpoint: {filename}")
+    return checkpoint_path

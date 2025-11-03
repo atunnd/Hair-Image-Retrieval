@@ -59,10 +59,8 @@ def parse_args():
     parser.add_argument('--num_workers', type=int, default=4)
 
     # negative sampling
-    parser.add_argument('--neg_sample', default=False, type=bool, help='Use negative sampling')
-    parser.add_argument('--warm_up_epochs', default=0, type=int, help='Number of warmup epochs for negative sampling')
-    parser.add_argument('--neg_loss', type=str, default="simclr", choices=['simclr', 'supcon', 'mae'], help="loss for negative sampling")
-    parser.add_argument('--sampling_frequency', type=int, default=0, help="Frequency to sample hard negative")
+    parser.add_argument('--warm_up_epochs', default=20, type=int, help='Number of warmup epochs for negative sampling')
+    parser.add_argument('--sampling_frequency', type=int, default=30, help="Frequency to sample hard negative")
     parser.add_argument('--ema', type=float, default=0.99)
 
     # supcon setting
@@ -116,15 +114,19 @@ def main(args):
         train_transform = MAETransform(input_size=224)
         test_transform = MAETransform(input_size=224)
     elif args.mode == "SHAM":
-        train_transform = SHAMTransform()
+        anchor_transform = MAETransform(input_size=224)
+        pos_transform = SimCLRTransform(input_size=224) 
 
     if args.mode == "simclr_supcon":
         train_dataset = CustomDataset(annotations_file=args.train_annotation, img_dir=args.img_dir, transform=TwoCropTransform(train_transform))
     else:
-        train_dataset = CustomDataset(annotations_file=args.train_annotation, img_dir=args.img_dir, transform=train_transform)
+        if args.mode == "SHAM":
+            train_dataset = CustomDataset(annotations_file=args.train_annotation, img_dir=args.img_dir, transform=anchor_transform, transform2=pos_transform, our_method=True)
+        else:
+            train_dataset = CustomDataset(annotations_file=args.train_annotation, img_dir=args.img_dir, transform=train_transform)
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, 
-                              shuffle=True, num_workers = args.num_workers, drop_last=False)
+                            shuffle=True, num_workers = args.num_workers, drop_last=False)
     
     if args.mode == "simclr_supcon":
         model = SupConResNet(name=args.model, feat_dim=args.classes)

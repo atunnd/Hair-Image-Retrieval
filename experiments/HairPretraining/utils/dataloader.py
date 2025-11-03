@@ -11,11 +11,11 @@ import cv2
 import numpy as np
 
 class CustomDataset(Dataset):
-    def __init__(self, annotations_file, img_dir, transform=None, transform_target=None):
+    def __init__(self, annotations_file, img_dir, transform=None, transform2=None, our_method=False):
         self.img_labels = pd.read_csv(annotations_file)
         self.img_dir = img_dir
         self.transform = transform
-        self.transform_target = transform_target
+        self.our_method=our_method
 
     def __len__(self):
         return len(self.img_labels)
@@ -34,10 +34,14 @@ class CustomDataset(Dataset):
         except Exception as e:
             print(f"[WARNING] Failed to load image {img_path}: {e}")
 
-
-        if self.transform:
+        if self.our_method:
+            anchor = self.transform2(image)
+            pos = self.transform(image)
+            return {
+                "anchor": anchor[0],
+                "pos1": pos[0],
+                "pos2": pos[1]
+            }
+        else:
             image = self.transform(image)
-        if self.transform_target:
-            label = self.transform_target
-
-        return image, label
+            return image, label
