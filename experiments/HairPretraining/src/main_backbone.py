@@ -129,7 +129,7 @@ class SHAM(nn.Module):
         # predict pixel values for masked tokens
         x_pred = utils.get_at_index(x_decoded, idx_mask)
         x_pred = self.decoder.predict(x_pred)
-        return x_pred
+        return x_decoded, x_pred
 
     # ---------------- Full Forward ----------------
     def forward(self, img_anchor, img_pos1, img_pos2):

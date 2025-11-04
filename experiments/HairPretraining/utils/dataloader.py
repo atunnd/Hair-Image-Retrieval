@@ -16,6 +16,7 @@ class CustomDataset(Dataset):
         self.img_dir = img_dir
         self.transform = transform
         self.our_method=our_method
+        self.transform2 = transform2
 
     def __len__(self):
         return len(self.img_labels)
@@ -35,12 +36,12 @@ class CustomDataset(Dataset):
             print(f"[WARNING] Failed to load image {img_path}: {e}")
 
         if self.our_method:
-            anchor = self.transform2(image)
-            pos = self.transform(image)
+            anchor = self.transform(image)
+            pos1, pos2 = self.transform2(image)
             return {
                 "anchor": anchor[0],
-                "pos1": pos[0],
-                "pos2": pos[1]
+                "pos1": pos1,
+                "pos2": pos2
             }
         else:
             image = self.transform(image)

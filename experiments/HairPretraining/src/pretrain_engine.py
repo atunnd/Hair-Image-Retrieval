@@ -79,7 +79,7 @@ class Trainer:
         elif self.mode == "simMIM":
             self.criterion = nn.L1Loss()
         elif self.mode == "SHAM":
-            self.criterion1 = nt_xent_1anchor_2positive
+            self.criterion1 = NTXentLoss(temperature=args.loss_temp)
             self.criterion2 = positive_consistency_loss_margin
             self.criterion3 = bidirectional_margin_loss
             self.criterion4 = nn.MSELoss()
@@ -446,12 +446,11 @@ class Trainer:
 
         for batch_id, batch in enumerate(tqdm(self.train_loader, desc="Training with negative samples")):
             self.optimizer.zero_grad()
-            images = batch[0]
+            images = batch
             current_m = momentum_val 
         
             update_momentum(self.model.backbone, self.model.teacher_backbone, m=current_m)
-            update_momentum(self.model.proj_global, self.model.teacher_proj_global, m=current_m)
-            update_momentum(self.model.proj_local, self.model.teacher_proj_local, m=current_m)
+            update_momentum(self.model.proj_head, self.model.teacher_proj_head, m=current_m)
             
             with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
                 x_anchor = images['anchor'].to(self.device)
@@ -474,9 +473,7 @@ class Trainer:
                     else:
                         embedding_hard_negative = self.hard_negative_memory
                 
-                embedding_pos = torch.concat([embedding_pos1, embedding_pos2.detach()], dim=0)
-                
-                contrastive_loss = self.criterion1(embedding_anchor, embedding_pos) # contrastive loss
+                contrastive_loss = self.criterion1(embedding_anchor, embedding_pos1) # contrastive loss
                 pos_consistency_loss = self.criterion2(embedding_pos1, embedding_pos2) # Positive–positive consistency loss
                 bidirectional_margin_loss = self.criterion3(embedding_anchor, embedding_pos1, embedding_pos2, embedding_hard_negative) 
                 reconstruction_loss = self.criterion4(masked_prediction, masked_GT) 
@@ -568,4 +565,3 @@ class Trainer:
 
         self.writer.close()  # Giải phóng resource
             
-
