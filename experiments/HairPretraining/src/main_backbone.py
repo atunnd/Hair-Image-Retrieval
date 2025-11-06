@@ -105,6 +105,9 @@ class SHAM(nn.Module):
         ):
             p.requires_grad = False
 
+        self.teacher_backbone.eval()
+        self.teacher_proj_head.eval()
+
 
     # ---------------- Encoder ----------------
     def forward_encoder(self, images, idx_keep=None):
@@ -158,7 +161,7 @@ class SHAM(nn.Module):
         
         # ------ forward pos2 ------
         with torch.no_grad():
-            pos_encoded_2 = self.forward_encoder_teacher(images=img_pos1, idx_keep=None)
+            pos_encoded_2 = self.forward_encoder_teacher(images=img_pos2, idx_keep=None)
             pos2_embedding = self.teacher_proj_head(pos_encoded_2[:, 1:].mean(dim=1))
         
         return {
