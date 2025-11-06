@@ -56,7 +56,7 @@ class Trainer:
         self.scaler = torch.cuda.amp.GradScaler() 
         
         # memory for hard negative
-        self.hard_negative_memory =  [torch.empty(0) for _ in range(len(self.train_loader))]
+        self.hard_negative_memory = []
         self.warm_up_epochs = args.warm_up_epochs
         self.sampling_frequency = args.sampling_frequency
 
@@ -393,7 +393,7 @@ class Trainer:
         X_np = X.detach().cpu().numpy().astype('float32') 
         D = X_np.shape[1] 
         use_gpu = faiss.get_num_gpus() > 0 
-        kmeans = faiss.Kmeans(d=D, k=K, niter=50, gpu=use_gpu, verbose=False) 
+        kmeans = faiss.Kmeans(d=D, k=K, niter=50, gpu=False, verbose=True) 
         kmeans.train(X_np) 
         centroids = torch.from_numpy(kmeans.centroids).to(X.device) 
         return centroids, kmeans
@@ -432,8 +432,8 @@ class Trainer:
         hard_neg_ids[same_mask] = I_samp[neighbor_centroid_ids[same_mask], 0]
 
         # --- 5. Lấy embeddings ---
-        hard_negatives = anchor[hard_neg_ids]
-        return hard_negatives
+        #hard_negatives = anchor[hard_neg_ids]
+        return hard_neg_ids
     
     def train_one_epoch_SHAM(self, epoch=0, momentum_val=0.99, scaler=None):
         self.model.train()
@@ -460,21 +460,27 @@ class Trainer:
                 embedding_anchor, embedding_pos1, embedding_pos2, masked_prediction, masked_GT = res['anchor'], res['pos1'], res['pos2'], res['masked_prediction'], res['masked_GT']
                 
                 if (epoch + 1) >= self.warm_up_epochs:
-                    if (epoch+1 - self.warm_up_epochs) % self.sampling_frequency == 0:
+                    #if (epoch+1 - self.warm_up_epochs) % self.sampling_frequency == 0:
+                    if (epoch+1) - self.warm_up_epochs == 0:
                         #K, m_star = self.estimate_K_by_PCA(embedding_anchor)
-                        K=5
+                        if batch_id ==0:
+                            print("=> Sampling new cluster\n")
+                            self.hard_negative_memory.clear()
+                        K=6
                         centroids, kmeans = self.run_kmeans(embedding_anchor, K, self.device_id)
-                        embedding_hard_negative = self.mine_hard_negatives(embedding_anchor, centroids, kmeans)
-                        self.hard_negative_memory[batch_id] = embedding_hard_negative
+                        hard_neg_ids = self.mine_hard_negatives(embedding_anchor, centroids, kmeans)
+                        self.hard_negative_memory.append(hard_neg_ids.detach().cpu().numpy())
                         #print(f"Estimated K = {K} (m* = {m_star})")
                     else:
-                        embedding_hard_negative = self.hard_negative_memory[batch_id]
+                        hard_neg_ids = self.hard_negative_memory[batch_id]
                 else:
-                    embedding_hard_negative = sample_random_hard_negatives(embedding_anchor)
-                    # if epoch == 0:
-                    #     self.hard_negative_memory.append(embedding_hard_negative)
-                    # else:
-                    self.hard_negative_memory[batch_id] = embedding_hard_negative
+                    hard_neg_ids = sample_random_hard_negatives(embedding_anchor)
+                    if epoch == 0:
+                        self.hard_negative_memory.append(hard_neg_ids.detach().cpu().numpy())
+                    else:
+                        self.hard_negative_memory[batch_id] = hard_neg_ids.detach().cpu().numpy()
+
+                embedding_hard_negative = embedding_anchor[hard_neg_ids]
                 
                 contrastive_loss = self.criterion1(embedding_anchor, embedding_pos1) # contrastive loss
                 pos_consistency_loss = self.criterion2(embedding_pos1, embedding_pos2) # Positive–positive consistency loss
@@ -496,6 +502,19 @@ class Trainer:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             scaler.step(self.optimizer)
             scaler.update()
+
+
+            del (
+                x_anchor, x_pos_1, x_pos_2,
+                embedding_anchor, embedding_pos1, embedding_pos2,
+                embedding_hard_negative,
+                masked_prediction, masked_GT,
+                total_loss, contrastive_loss, pos_consistency_loss,
+                bidirectional_margin_loss, reconstruction_loss
+            )
+
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
         
         self.writer.add_scalar('Epoch/Current', epoch, global_step=epoch)
         self.writer.add_scalars(

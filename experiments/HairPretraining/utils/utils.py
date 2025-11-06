@@ -21,16 +21,16 @@ def sample_random_hard_negatives(anchor: torch.Tensor) -> torch.Tensor:
     device = anchor.device
 
     # Random shuffle chỉ số trong batch
-    perm = torch.randperm(B, device=device)
+    perm = torch.randperm(B, device="cpu")
 
     # Nếu một anchor trùng chính nó, shift 1
-    same = perm == torch.arange(B, device=device)
+    same = perm == torch.arange(B, device="cpu")
     if same.any():
         perm[same] = (perm[same] + 1) % B
 
     # Lấy negative
-    hard_negatives = anchor[perm]
-    return hard_negatives
+    #hard_negatives = anchor[perm]
+    return perm
 
 
 def mse_alignment_loss(model, positives, masked_positives, beta=0.05):
