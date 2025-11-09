@@ -143,10 +143,20 @@ class Trainer:
         #    Creating saving directory     #
         ####################################    
         self.momentum_ema = args.ema
+        
+        args.full_face_training
+        
         if args.mode=="SHAM":
-            self.save_path = os.path.join(self.save_path, f"{self.mode}_{self.mode_model}_{self.args.SHAM_mode}")    
+            if args.full_face_training:
+                self.save_path = os.path.join(self.save_path, f"{self.mode}_{self.mode_model}_{self.args.SHAM_mode}_full_face_training") 
+            else:
+                self.save_path = os.path.join(self.save_path, f"{self.mode}_{self.mode_model}_{self.args.SHAM_mode}")    
         else: 
-            self.save_path = os.path.join(self.save_path, f"{self.mode}_{self.mode_model}")
+            if args.full_face_training:
+                self.save_path = os.path.join(self.save_path, f"{self.mode}_{self.mode_model}_full_face_training")
+            else:
+                self.save_path = os.path.join(self.save_path, f"{self.mode}_{self.mode_model}")
+                
         if not os.path.exists(self.save_path) and self.args.continue_training is False:
             print(f"Save {args.mode} at {self.save_path}")      
             os.makedirs(self.save_path, exist_ok=True)
