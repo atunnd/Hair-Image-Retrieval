@@ -10,7 +10,7 @@ python mainpretrain.py \
   --size 224 \
   --train_annotation data/data_train.csv\
   --test_annotation data/data_test.csv \
-  --img_dir /mnt/mmlab2024nas/thanhnd_student/QuocAnh/FCIR/Baselines/Composed-Image-Retrieval/experiments/HairClassification/data/hair_regions/train/dummy_class \
+  --img_dir /mnt/mmlab2024nas/thanhnd_student/QuocAnh/FCIR/Baselines/Composed-Image-Retrieval/experiments/HairClassification/data/hair_regions/ \
   --lr 0.001 \
   --weight_decay 0.0001 \
   --beta1 0.9 \
@@ -22,5 +22,3 @@ python mainpretrain.py \
   --num_workers 8 \
   --SHAM_mode embedding \
 
-
-    

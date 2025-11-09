@@ -8,7 +8,7 @@ from utils.transform import knn_transform
 from utils.dataloader import CustomDataset
 import torch
 from torch.utils.data import DataLoader
-from src.backbone import SupConResNet, SimCLR, MAE, DINOv2, SimMIM, OriginSimCLR, ViTFeatureExtractor, SiameseIMViT
+from src.backbone import SupConResNet, SimCLR, MAE, DINOv2, SimMIM, SimCLR, SiameseIMViT
 import torch
 import torchvision
 from torch import nn

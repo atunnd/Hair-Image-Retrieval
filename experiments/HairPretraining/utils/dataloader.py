@@ -12,7 +12,7 @@ import numpy as np
 
 class CustomDataset(Dataset):
     def __init__(self, annotations_file, img_dir, transform=None, transform2=None, our_method=False):
-        self.img_labels = pd.read_csv(annotations_file)
+        self.img_labels = pd.read_csv(annotations_file)[:30000]
         self.img_dir = img_dir
         self.transform = transform
         self.our_method = our_method

@@ -457,13 +457,10 @@ class Trainer:
         running_loss_reconstruction =0.0
 
         for batch_id, batch in enumerate(tqdm(self.train_loader, desc="Training with negative samples")):
-            self.optimizer.zero_grad()
+            
             images = batch
             current_m = momentum_val 
-        
-            update_momentum(self.model.backbone, self.model.teacher_backbone, m=current_m)
-            update_momentum(self.model.proj_head, self.model.teacher_proj_head, m=current_m)
-            
+    
             with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
                 x_anchor = images['anchor'].to(self.device)
                 x_pos_1 = images['pos1'].to(self.device) 
@@ -471,6 +468,7 @@ class Trainer:
                 
                 res = self.model(img_anchor=x_anchor, img_pos1=x_pos_1, img_pos2=x_pos_2)
                 embedding_anchor, embedding_pos1, embedding_pos2, masked_prediction, masked_GT = res['anchor'], res['pos1'], res['pos2'], res['masked_prediction'], res['masked_GT']
+
                 
                 if (epoch + 1) > self.warm_up_epochs:
                     #if (epoch+1 - self.warm_up_epochs) % self.sampling_frequency == 0:
@@ -500,7 +498,7 @@ class Trainer:
                 bidirectional_margin_loss = self.criterion3(embedding_anchor, embedding_pos1, embedding_pos2, embedding_hard_negative) 
                 reconstruction_loss = self.criterion4(masked_prediction, masked_GT) 
                 
-                total_loss = contrastive_loss + 0.5*reconstruction_loss + 0.3*bidirectional_margin_loss + 0.1*pos_consistency_loss
+                total_loss = contrastive_loss + 0.5*reconstruction_loss + 0.2*bidirectional_margin_loss + 0.1*pos_consistency_loss
             
             running_loss_total += total_loss.item()
             running_loss_contrastive += contrastive_loss.item()
@@ -508,32 +506,31 @@ class Trainer:
             running_loss_margin += bidirectional_margin_loss.item()
             running_loss_reconstruction += reconstruction_loss.item()
             
-            #total_loss.backward()
-            #self.optimizer.step()
+            if batch_id < 3:
+                print(f"Batch id {batch_id}: alloc, reserved:", torch.cuda.memory_allocated()/1e9, torch.cuda.memory_reserved()/1e9)
+            
             scaler.scale(total_loss).backward()
-            scaler.unscale_(self.optimizer)
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             scaler.step(self.optimizer)
             scaler.update()
-
+            self.optimizer.zero_grad()
+            
+            update_momentum(self.model.student_backbone, self.model.teacher_backbone, m=current_m)
+            update_momentum(self.model.student_head, self.model.teacher_head, m=current_m)
+            
 
             del (
                 x_anchor, x_pos_1, x_pos_2,
-                embedding_anchor, embedding_pos1, embedding_pos2,
+                embedding_anchor, 
+                embedding_pos1, 
+                embedding_pos2,
                 embedding_hard_negative,
                 masked_prediction, masked_GT,
-                total_loss, contrastive_loss, pos_consistency_loss,
-                bidirectional_margin_loss, reconstruction_loss
+                total_loss, 
+                contrastive_loss, 
+                pos_consistency_loss,
+                bidirectional_margin_loss, 
+                reconstruction_loss
             )
-        
-        self.writer.add_scalar('Epoch/Current', epoch, global_step=epoch)
-        self.writer.add_scalars(
-            'Loss/Avg_per_Epoch',  # Nhóm dưới tag này để dễ xem theo epoch
-            {
-                'total_loss': running_loss_total/len(self.train_loader),
-            },
-            global_step=epoch  # Sử dụng epoch trực tiếp làm step cho log epoch-level
-        )
 
         with open(self.log_file, 'a') as f:
             f.write(f"\nEpoch {epoch}: Total Loss = {running_loss_total/len(self.train_loader):.6f}, Contrastive Loss = {running_loss_contrastive/len(self.train_loader):.6f}, Pos-pos Loss = {running_loss_pos_pos/len(self.train_loader):.6f}, Bi-margin Loss = {running_loss_margin/len(self.train_loader):.6f}, Reconstruction loss = {running_loss_reconstruction/len(self.train_loader):.6f}\n")
@@ -566,18 +563,7 @@ class Trainer:
             if (epoch+1) % 50 == 0:
                 file_name = os.path.join(self.save_path, f"model_ckpt_{epoch}.pth")
                 if self.mode=="SHAM":
-                    checkpoint = {
-                        'epoch': epoch,
-                        'model_state_dict': self.model.state_dict(),
-                        'optimizer_state_dict': self.optimizer.state_dict(),
-                        'scaler_state_dict': self.scaler.state_dict(),
-                        'args': self.args,
-                        'Total_loss': total_loss,
-                        'Contrastive Loss': contrastive_loss,
-                        'Pos-pos loss': pos_pos_loss,
-                        'Bi-margin loss': bi_margin_loss,
-                        'Reconstruction loss': reconstruction_loss
-                    }
+                    self.save_checkpoint(epoch, file_name, total_loss, contrastive_loss, pos_pos_loss, bi_margin_loss, reconstruction_loss)
                 else:
                     checkpoint = {
                         'epoch': epoch,
@@ -587,23 +573,12 @@ class Trainer:
                         'args': self.args,
                         'Total_loss': total_loss,
                     }
-                torch.save(checkpoint, file_name)
-                print(f"✅ Saved checkpoint at epoch {epoch} -> {file_name}")
+                    torch.save(checkpoint, file_name)
+                    print(f"✅ Saved checkpoint at epoch {epoch} -> {file_name}")
                     
             file_name = os.path.join(self.save_path, f"model_ckpt_latest.pth")
             if self.mode=="SHAM":
-                checkpoint = {
-                    'epoch': epoch,
-                    'model_state_dict': self.model.state_dict(),
-                    'optimizer_state_dict': self.optimizer.state_dict(),
-                    'scaler_state_dict': self.scaler.state_dict(),
-                    'args': self.args,
-                    "Total_loss": total_loss,
-                    'Contrastive Loss': contrastive_loss,
-                    'Pos-pos loss': pos_pos_loss,
-                    'Bi-margin loss': bi_margin_loss,
-                    'Reconstruction loss': reconstruction_loss
-                }
+                self.save_checkpoint(epoch, file_name, total_loss, contrastive_loss, pos_pos_loss, bi_margin_loss, reconstruction_loss)
             else:
                 checkpoint = {
                     'epoch': epoch,
@@ -613,8 +588,42 @@ class Trainer:
                     'args': self.args,
                     'Total_loss': total_loss,
                     }
-            torch.save(checkpoint, file_name)
-            print(f"✅ Saved checkpoint at epoch {epoch} -> {file_name}")
+                torch.save(checkpoint, file_name)
+                print(f"✅ Saved checkpoint at epoch {epoch} -> {file_name}")
 
         self.writer.close()  # Giải phóng resource
+    
+    def save_checkpoint(self, epoch, file_name, total_loss, contrastive_loss, pos_pos_loss, bi_margin_loss, reconstruction_loss):
+    # Move model and optimizer to CPU before saving
+        model_cpu = {k: v.detach().cpu() for k, v in self.model.state_dict().items()}
+        optimizer_cpu = {
+            'state': {
+                k: {kk: vv.detach().cpu() if torch.is_tensor(vv) else vv
+                    for kk, vv in v.items()}
+                for k, v in self.optimizer.state_dict()['state'].items()
+            },
+            'param_groups': self.optimizer.state_dict()['param_groups']
+        }
+        scaler_cpu = self.scaler.state_dict()
+
+        checkpoint = {
+            'epoch': epoch,
+            'model_state_dict': model_cpu,
+            'optimizer_state_dict': optimizer_cpu,
+            'scaler_state_dict': scaler_cpu,
+            'args': self.args,
+            'Total_loss': total_loss,
+            'Contrastive Loss': contrastive_loss,
+            'Pos-pos loss': pos_pos_loss,
+            'Bi-margin loss': bi_margin_loss,
+            'Reconstruction loss': reconstruction_loss,
+        }
+
+        print("Saving checkpoint safely to CPU...")
+        torch.save(checkpoint, file_name)
+
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+
             
