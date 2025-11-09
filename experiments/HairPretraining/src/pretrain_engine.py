@@ -472,7 +472,7 @@ class Trainer:
                 res = self.model(img_anchor=x_anchor, img_pos1=x_pos_1, img_pos2=x_pos_2)
                 embedding_anchor, embedding_pos1, embedding_pos2, masked_prediction, masked_GT = res['anchor'], res['pos1'], res['pos2'], res['masked_prediction'], res['masked_GT']
                 
-                if (epoch + 1) >= self.warm_up_epochs:
+                if (epoch + 1) > self.warm_up_epochs:
                     #if (epoch+1 - self.warm_up_epochs) % self.sampling_frequency == 0:
                     if (epoch+1) - self.warm_up_epochs == 0:
                         #K, m_star = self.estimate_K_by_PCA(embedding_anchor)

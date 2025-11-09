@@ -14,6 +14,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from lightly.models.modules import MAEDecoderTIMM, SimCLRProjectionHead, DINOProjectionHead
+
 class ProjectionHead(nn.Module):
     def __init__(self, input_dim=512, hidden_dim=2048, output_dim=128, use_bn=True):
         super().__init__()
@@ -97,7 +99,7 @@ class SHAM(nn.Module):
             mlp_ratio=4.0,
         )
 
-        self.proj_head = ProjectionHead(input_dim=embed_dim)
+        self.proj_head = SimCLRProjectionHead(embed_dim, embed_dim, 256)
 
         # ========== EMA Teacher ==========
         self.teacher_backbone = copy.deepcopy(self.backbone)
