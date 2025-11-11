@@ -212,6 +212,6 @@ class SHAM(nn.Module):
         
     def extract_features(self, images):
         x_encoded = self.forward_encoder_student(images)
-        return x_encoded[:, :1].mean(dim=1)
+        return x_encoded[:, 1:, :].mean(dim=1)
 
 
