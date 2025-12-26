@@ -11,8 +11,8 @@ from lightly.loss import NTXentLoss
 from utils.utils import get_optimizer, linear_increase_alpha, margin_decay, mse_alignment_loss, get_latest_checkpoint, sample_random_hard_negatives
 from utils.transform import positive_transform, negative_transform, PositiveMaskingTransform
 
-from utils.losses import positive_consistency_loss_margin, bidirectional_margin_loss, nt_xent_1anchor_2positive, S2R2Loss
-
+from utils.losses import positive_consistency_loss_margin, bidirectional_margin_loss, nt_xent_1anchor_2positive, S2R2Loss, DistillationLoss, DenseLoss
+from .neg_sampling import NegSamplerRandomly, NegSamplerStatic
 #from utils.losses import DINOLoss, IBOTPatchLoss
 import timm
 from lightly.utils.scheduler import cosine_schedule
@@ -30,6 +30,9 @@ import random
 
 import faiss
 import numpy as np
+from lightly.utils.scheduler import cosine_schedule
+from lightly.models import utils
+from lightly.loss import MSNLoss
 
 class Trainer:
     def __init__(self, model, train_loader, val_loader, args):
@@ -58,7 +61,7 @@ class Trainer:
         self.negative_sampling = args.negative_sampling
         self.hard_negative_memory = []
         self.warm_up_epochs = args.warm_up_epochs
-        self.sampling_frequency = args.sampling_frequency
+        #self.sampling_frequency = args.sampling_frequency
         self.multi_view = args.multi_view
         self.no_contrastive_loss = args.no_contrastive_loss
 
@@ -79,23 +82,35 @@ class Trainer:
             self.criterion = "Total loss DINO, IBOTPatchLoss, KoLeoLoss"
         elif self.mode == "simMIM":
             self.criterion = nn.L1Loss()
+        elif self.mode == "DenseCL":
+            self.criterion_global = NTXentLoss(memory_bank_size=(4096, 512))
+            self.criterion_local = NTXentLoss(memory_bank_size=(4096, 512))
+        elif self.mode == "MSN":
+            self.criterion = MSNLoss()
         elif self.mode == "SHAM":
             self.criterion1 = NTXentLoss(temperature=args.temp)
-            self.criterion2 = positive_consistency_loss_margin
-            self.criterion3 = bidirectional_margin_loss
-            self.criterion4 = nn.MSELoss()
-            if self.multi_view:
-                self.criterion5 = S2R2Loss(tau=0.01, k_views=5)
-            else:
-                self.criterion5 = S2R2Loss(tau=0.01, k_views=3)
-
+            self.criterion2 = DistillationLoss()
+            self.criterion3 = DenseLoss()
+            self.triplet_loss_stage1 = nn.TripletMarginLoss(margin=0.7, p=2, eps=1e-7)
+            self.triplet_loss_stage2 = nn.TripletMarginLoss(margin=0.5, p=2, eps=1e-7)
+            self.criterion5 = S2R2Loss(tau=0.01, k_views=3)
+            self.positive_masking_transform = PositiveMaskingTransform(mask_ratio_range=(0.1, 0.5))
         
         # optimizer configuration
-        self.optimizer = get_optimizer(self.model, self.lr, self.weight_decay, self.beta1, self.beta2)
+        if not self.mode == "DenseCL":
+            self.optimizer = get_optimizer(self.model, self.lr, self.weight_decay, self.beta1, self.beta2)
+        else:
+            params = [
+                *list(model.anchor_backbone.parameters()),
+                *list(model.anchor_projection_head.parameters()),
+                model.prototypes,
+            ]
+            self.optimizer = torch.optim.Adam(params, self.lr)
 
         # choosing backbone
         self.mode_model = args.model
-        
+
+        self.negative_batch_idx =[]
         
 
         ####################################
@@ -143,9 +158,9 @@ class Trainer:
                         if isinstance(v, torch.Tensor):
                             state[k] = v.to(self.device)
                 
-                if self.negative_sampling:
-                    print("🔁 Loading hard neg indices")
-                    self.hard_negative_memory = torch.load(os.path.join(self.save_path, f"hard_neg_indices.pt"), weights_only=False)
+                # if self.negative_sampling:
+                #     print("🔁 Loading hard neg indices")
+                #     self.negative_batch_idx= torch.load(os.path.join(self.save_path, f"hard_neg_indices.pt"), weights_only=False)
         else:
             self.start_epoch = 0
             global_loss, local_loss = 0.0, 0.0
@@ -160,19 +175,15 @@ class Trainer:
         if not self.args.continue_training:
             if args.mode=="SHAM":
                 if args.full_face_training:
-                    if self.negative_sampling:
-                        self.save_path = os.path.join(self.save_path, f"{self.mode}_{self.mode_model}_{self.args.SHAM_mode}_full_face_training_hard_negative_mining")    
-                    else:
-                        self.save_path = os.path.join(self.save_path, f"{self.mode}_{self.mode_model}_{self.args.SHAM_mode}_full_face_training") 
+                    self.save_path = os.path.join(self.save_path, f"{self.mode}_{self.mode_model}_full_face_training") 
                 elif args.multi_view:
-                    self.save_path = os.path.join(self.save_path, f"{self.mode}_{self.mode_model}_{self.args.SHAM_mode}_multi_view_decoder_7_layers") 
+                    self.save_path = os.path.join(self.save_path, f"{self.mode}_{self.mode_model}_multi_view_hard_negative_mining") 
+                elif self.negative_sampling:
+                    self.save_path = os.path.join(self.save_path, f"{self.mode}_{self.mode_model}_hard_negative_mining")
                 elif self.no_contrastive_loss:
-                    self.save_path = os.path.join(self.save_path, f"{self.mode}_{self.mode_model}_{self.args.SHAM_mode}_no_contrastive_loss")
+                    self.save_path = os.path.join(self.save_path, f"{self.mode}_{self.mode_model}_no_contrastive_loss")
                 else:
-                    if self.negative_sampling:
-                        self.save_path = os.path.join(self.save_path, f"{self.mode}_{self.mode_model}_{self.args.SHAM_mode}_hard_negative_mining")    
-                    else:
-                        self.save_path = os.path.join(self.save_path, f"{self.mode}_{self.mode_model}_{self.args.SHAM_mode}")    
+                    self.save_path = os.path.join(self.save_path, f"{self.mode}_{self.mode_model}")    
             else: 
                 if args.full_face_training:
                     self.save_path = os.path.join(self.save_path, f"{self.mode}_{self.mode_model}_full_face_training")
@@ -214,9 +225,7 @@ class Trainer:
                 loss = self.criterion(z0, z1)
                 running_loss += loss.detach()
 
-            #loss.backward()
             scaler.scale(loss).backward()
-            #self.optimizer.step()
             scaler.step(self.optimizer)
             scaler.update()
             self.optimizer.zero_grad() 
@@ -225,6 +234,87 @@ class Trainer:
             f.write(f"\nEpoch {epoch}: Total Loss = {running_loss/len(self.train_loader):.6f}\n")
             
         return running_loss / len(self.train_loader)
+    
+    def train_one_epoch_msn(self, epoch=0, alpha=0, scaler=None):
+        self.model.train()
+        running_loss = 0.0
+        for batch in tqdm(self.train_loader, desc="Training"):
+            with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+                views = batch[0]
+                utils.update_momentum(self.model.anchor_backbone, self.model.backbone, m=0.996)
+                utils.update_momentum(
+                    self.model.anchor_projection_head, self.model.projection_head, m=0.996
+                )
+                
+                views = [view.to(self.device, non_blocking=True) for view in views]
+                targets = views[0]
+                anchors = views[1]
+                anchors_focal = torch.concat(views[2:], dim=0)
+
+                targets_out = self.model.backbone(targets)
+                targets_out = self.model.projection_head(targets_out)
+                anchors_out = self.model.forward_masked(anchors)
+                anchors_focal_out = self.model.forward_masked(anchors_focal)
+                anchors_out = torch.cat([anchors_out, anchors_focal_out], dim=0)
+
+                loss = self.criterion(anchors_out, targets_out, self.model.prototypes.data)
+                running_loss += loss.detach()
+
+            scaler.scale(loss).backward()
+            scaler.step(self.optimizer)
+            scaler.update()
+            self.optimizer.zero_grad() 
+        
+        with open(self.log_file, 'a') as f:
+            f.write(f"\nEpoch {epoch}: Total Loss = {running_loss/len(self.train_loader):.6f}\n")
+            
+        return running_loss / len(self.train_loader)
+    
+    
+    def train_one_epoch_densecl(self, epoch=0, alpha=0, scaler=None):
+        self.model.train()
+        running_loss = 0.0
+        running_global_loss =0.0
+        running_local_loss = 0.0
+        momentum = cosine_schedule(epoch, self.epochs, 0.996, 1)
+        for batch in tqdm(self.train_loader, desc="Training"):
+            with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+                x_query, x_key = batch[0]
+                utils.update_momentum(self.model.backbone, self.model.backbone_momentum, m=momentum)
+                utils.update_momentum(
+                    self.model.projection_head_global, self.model.projection_head_global_momentum, m=momentum
+                )
+                utils.update_momentum(
+                    self.model.projection_head_local, self.model.projection_head_local_momentum, m=momentum
+                )
+                
+                x_query = x_query.to(self.device)
+                x_key = x_key.to(self.device)
+                query_features, query_global, query_local = self.model(x_query)
+                key_features, key_global, key_local = self.model.forward_momentum(x_key)
+
+                key_local = utils.select_most_similar(query_features, key_features, key_local)
+                query_local = query_local.flatten(end_dim=1)
+                key_local = key_local.flatten(end_dim=1)
+
+                loss_global = self.criterion_global(query_global, key_global)
+                loss_local = self.criterion_local(query_local, key_local)
+                lambda_ = 0.5
+                loss = (1 - lambda_) * loss_global + lambda_ * loss_local
+                running_loss += loss.detach()
+                running_global_loss += loss_global.item()
+                running_local_loss += loss_local.item()
+
+            scaler.scale(loss).backward()
+            scaler.step(self.optimizer)
+            scaler.update()
+            self.optimizer.zero_grad() 
+        
+        with open(self.log_file, 'a') as f:
+            f.write(f"\nEpoch {epoch}: Total Loss = {running_loss/len(self.train_loader):.6f}\n")
+            
+        return running_loss / len(self.train_loader)
+    
     
     def train_one_epoch_mae(self, epoch=0, alpha=0, scaler=None):
         self.model.train()
@@ -474,143 +564,148 @@ class Trainer:
         #hard_negatives = anchor[hard_neg_ids]
         return hard_neg_ids
     
-    def train_one_epoch_SHAM(self, epoch=0, momentum_val=0.99, scaler=None):
+    def train_one_epoch_SHAM(self, epoch=0, momentum_val=0.99, scaler=None, prev_margin_violations=0):
         self.model.train()
         running_loss_total = 0.0
         running_loss_contrastive = 0.0
-        running_loss_pos_pos = 0.0
-        running_loss_margin = 0.0
-        running_loss_reconstruction=0.0
+        running_loss_triplet =0.0
+        running_loss_mse =0.0
+        running_loss_dense=0.0
         running_loss_ranking=0.0
-        running_loss_local_ranking=0.0
-
+        running_loss_distillation=0.0
+        running_post_dist = 0.0
+        running_neg_dist = 0.0
+        running_margin_violations = 0.0
+        total_k=0.0
+        momentum = cosine_schedule(epoch, self.epochs, 0.996, 1)
+        
         for batch_id, batch in enumerate(tqdm(self.train_loader, desc="Training with negative samples")):
+            self.optimizer.zero_grad()
+            
+            # update backbone momentum
+            # update header
+            #update_momentum(self.model.student_backbone, self.model.teacher_backbone, m=momentum)
+            #update_momentum(self.model.student_head, self.model.teacher_head, m=momentum)
+            #update_momentum(self.model.student_fusion_head, self.model.teacher_fusion_head, m=momentum)
+            current_m = momentum_val  
+            update_momentum(self.model.backbone, self.model.backbone_momentum, m=current_m)
+            update_momentum(self.model.projection_head, self.model.projection_head_momentum, m=current_m)
             
             images = batch
             current_m = momentum_val 
     
-            with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
-                x_anchor = images['anchor'].to(self.device)
-                x_pos_1 = images['pos1'].to(self.device) 
-                x_pos_2 = images['pos2'].to(self.device)
-                if self.multi_view:
-                    x_pos_3 = images['pos3'].to(self.device) 
-                    x_pos_4 = images['pos4'].to(self.device)
-                
-                if self.multi_view:
-                    res = self.model(img_anchor=x_anchor, img_pos1=x_pos_1, img_pos2=x_pos_2, img_pos3=x_pos_3, img_pos4=x_pos_4)
-                    embedding_anchor, embedding_pos1, embedding_pos2, embedding_pos3, embedding_pos4, masked_prediction, masked_GT = res['anchor'], res['pos1'], res['pos2'], res['pos3'], res['pos4'], res['masked_prediction'], res['masked_GT']
-                else:
-                    res = self.model(img_anchor=x_anchor, img_pos1=x_pos_1, img_pos2=x_pos_2)
-                    embedding_anchor, embedding_pos1, embedding_pos2, masked_prediction, masked_GT = res['anchor'], res['pos1'], res['pos2'], res['masked_prediction'], res['masked_GT']
-
-                # if self.negative_sampling:
-                #     if (epoch + 1) >= self.warm_up_epochs:
-                #     #if (epoch+1 - self.warm_up_epochs) % self.sampling_frequency == 0:
-                #         #if (epoch+1) % self.sampling_frequency == 0:
-                #         if (epoch+1) - self.warm_up_epochs == 0:
-                #             #K, m_star = self.estimate_K_by_PCA(embedding_anchor)
-                #             if batch_id ==0:
-                #                 print("=> Sampling new cluster\n")
-                #                 self.hard_negative_memory = []
-                #             K=6
-                #             centroids, kmeans = self.run_kmeans(embedding_anchor, K, self.device_id)
-                #             hard_neg_ids = self.mine_hard_negatives(embedding_anchor, centroids, kmeans)
-                #             self.hard_negative_memory.append(hard_neg_ids.detach().cpu().numpy())
-                #             #print(f"Estimated K = {K} (m* = {m_star})")
-                #             if batch_id == len(self.train_loader) - 1:
-                #                 print("=>> Save hard neg indices")
-                #                 file_name = os.path.join(self.save_path, f"hard_neg_indices.pt")
-                #                 torch.save(self.hard_negative_memory, file_name)
-                                
-                #         else:
-                #             hard_neg_ids = self.hard_negative_memory[batch_id]
-                #     else:
-                #         hard_neg_ids = sample_random_hard_negatives(embedding_anchor)
-                #         if epoch == 0:
-                #             self.hard_negative_memory.append(hard_neg_ids.detach().cpu().numpy())
-                #         else:
-                #             self.hard_negative_memory[batch_id] = hard_neg_ids.detach().cpu().numpy()
-
-                #     embedding_hard_negative = embedding_anchor[hard_neg_ids]
-                
-                if batch_id == 0:
-                    with torch.no_grad():
-                        emb_a = embedding_anchor
-                        emb_p1_n = embedding_pos1
-                        emb_a_n = F.normalize(embedding_anchor, dim=-1)
-                        emb_p1_n = F.normalize(embedding_pos1, dim=-1)
-                        mean_norm = emb_a.norm(dim=-1).mean().item()
-                        pos_cos_mean = (emb_a_n * emb_p1_n).sum(dim=-1).mean().item()
-                        max_logit = (emb_a_n @ emb_p1_n.t()).max().item()
-                    print(f"[DBG] emb_norm={mean_norm:.4f}, pos_cos_mean={pos_cos_mean:.4f}, max_logit={max_logit:.4f}")
-
-                if self.no_contrastive_loss is False:
-                    contrastive_loss = self.criterion1(embedding_anchor, embedding_pos1) # contrastive loss
-                reconstruction_loss = self.criterion4(masked_prediction, masked_GT) 
-                if self.negative_sampling:
-                    # if (epoch + 1) >= self.warm_up_epochs:
-                    #     pos_consistency_loss = self.criterion2(embedding_pos1, embedding_pos2, m_p=0.3) # Positive–positive consistency loss
-                    #     bidirectional_margin_loss = self.criterion3(embedding_anchor, embedding_pos1, embedding_pos2, embedding_hard_negative, m_p=0.3, m_n=0.5)
-                    # else:
-                    #     pos_consistency_loss = self.criterion2(embedding_pos1, embedding_pos2, m_p=0.1) # Positive–positive consistency loss
-                    #     bidirectional_margin_loss = self.criterion3(embedding_anchor, embedding_pos1, embedding_pos2, embedding_hard_negative, m_p=0.1, m_n=0.7)
-                    # total_loss = contrastive_loss + 0.5*reconstruction_loss + 0.2*bidirectional_margin_loss + 0.1*pos_consistency_loss
-                    # ranking_loss=0
-                    ranking_loss = self.criterion5(torch.cat([embedding_anchor, embedding_pos1, embedding_pos2], dim=0))
-                    total_loss = 0.5*contrastive_loss + 0.3*reconstruction_loss + ranking_loss
-                elif self.multi_view:
-                    ranking_loss = self.criterion5(torch.cat([embedding_anchor, embedding_pos1, embedding_pos2,embedding_pos3,embedding_pos4], dim=0))
-                    #total_loss = 0.2*contrastive_loss + 0.3*reconstruction_loss + ranking_loss
-                    total_loss = 0.5*contrastive_loss + 0.5*reconstruction_loss + 0.5*ranking_loss
-                else:
-                    ranking_loss = self.criterion5(torch.cat([embedding_anchor, embedding_pos1, embedding_pos2], dim=0))
-                    if self.no_contrastive_loss:
-                        total_loss = 0.3*reconstruction_loss + ranking_loss
-                    else:
-                        total_loss = 0.5*contrastive_loss + 0.3*reconstruction_loss + 0.5*ranking_loss
+            x_anchor = images['anchor'].to(self.device)
+            x_pos_1 = images['pos1'].to(self.device) 
+            #x_pos_2 = images['pos2'].to(self.device)
+            # if self.multi_view:
+            #     x_pos_3 = images['pos3'].to(self.device) 
             
-            running_loss_total += total_loss.item()
-            if self.no_contrastive_loss is False:
+            
+            if self.warm_up_epochs > epoch + 1:     #STAGE 1: RANDOMLY NEGATIVE MINING
+                negative_samples = NegSamplerRandomly(x_pos_1)
+            else:
+                if (epoch + 1) == self.warm_up_epochs:
+                    if batch_id == 0:
+                        self.negative_batch_idx = []
+
+                        B = x_anchor.shape[0]
+                        v = prev_margin_violations/B
+                        x = max(2, math.floor((1 - v) * 10))
+                        y = x + 5
+                        random_k = random.randint(x, y)
+                        total_k = random_k
+                        print(f"\n=>[x, y] = [{x}, {y}]\n")
+                        
+                    self.negative_batch_idx.append(NegSamplerStatic(self.model, x_pos_1, k=total_k)) # negative with momentum model
+                
+                    if batch_id == len(self.train_loader) - 1:
+                        print("==> Hard neg indices saved!")
+                        file_name = os.path.join(self.save_path, f"hard_neg_indices.pt")
+                        torch.save(self.negative_batch_idx, file_name)
+
+                # print("Len idx: ", len(self.negative_batch_idx[batch_id]))
+                negative_samples = x_pos_1[self.negative_batch_idx[batch_id]]
+                # print("Negative samples: ", negative_samples[0].min(), negative_samples[0].max())
+            
+            with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+                # res = self.model(x_anchor, x_pos_2, x_pos_3)
+                # anchor_batch_s, anchor_batch_t, pos_batch, pos_batch_2 = res["anchor_s"], res["anchor_t"], res["pos_contrastive"], res["pos2_contrastive"]
+                # anchor_ranking, pos_batch_ranking, pos_batch_2_ranking = res["anchor_ranking"], res["pos_ranking"], res["pos2_ranking"]
+                # anchor_patch, pos_patch = res["anchor_patch"], res["pos_patch"]
+                neg_batch = self.model(negative_samples)
+                pos_samples = positive_transform(x_pos_1)
+                pos_batch = self.model(pos_samples)
+                anchor_batch = self.model(x_anchor)
+                masked_pos_samples = self.positive_masking_transform(pos_samples)
+                masked_pos_batch = self.model.forward_momentum(masked_pos_samples)
+                
+            
+            neg_batch = F.normalize(neg_batch, p=2, dim=1)
+            pos_batch = F.normalize(pos_batch, p=2, dim=1)
+            anchor_batch = F.normalize(anchor_batch, p=2, dim=1)
+            masked_pos_batch = F.normalize(masked_pos_batch, p=2, dim=1)
+            with torch.no_grad():
+                pos_dist = torch.norm(anchor_batch - pos_batch, p=2, dim=1)
+                neg_dist = torch.norm(anchor_batch - neg_batch, p=2, dim=1)
+                if self.warm_up_epochs > epoch + 1:
+                    margin = self.triplet_loss_stage1.margin
+                else:
+                    margin = self.triplet_loss_stage2.margin
+                #margin = trip_margin
+                violations = (pos_dist - neg_dist + margin > 0)  # True = bị phạt
+                running_post_dist += pos_dist.mean().item()
+                running_neg_dist += neg_dist.mean().item()
+                running_margin_violations += violations.sum().item()
+                
+                # if self.warm_up_epochs > epoch + 1:
+                #     neg_batch = NegSamplerRandomly(anchor_batch_s)
+                # else:
+                #     neg_batch = anchor_batch_s[self.negative_batch_idx[batch_id]]
+                
+                #Forward triplet loss
+            with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+                if self.warm_up_epochs > epoch + 1:
+                    triplet_loss = self.triplet_loss_stage1(anchor_batch, pos_batch, neg_batch)
+                else:
+                    triplet_loss = self.triplet_loss_stage2(anchor_batch, pos_batch, neg_batch)
+                
+                # Forward distillation loss
+                #distillation_loss = self.criterion2(anchor_batch_s, anchor_batch_t)
+                
+                # Forward contrastive loss
+                contrastive_loss = self.criterion1(pos_batch, anchor_batch)
+                
+                # Forward MSE losss
+                mse_loss = F.mse_loss(pos_batch, masked_pos_batch, reduction='mean')
+                
+                # Forward positive ranking loss
+                #ranking_loss = self.criterion5(torch.cat([anchor_ranking, pos_batch_ranking, pos_batch_2_ranking], dim=0))
+                
+                # Forward dense loss
+                #dense_loss = self.criterion3(anchor_patch, pos_patch)
+                
+                # Total loss
+                total_loss = contrastive_loss + 0.5*triplet_loss + 0.2*mse_loss
+                
                 running_loss_contrastive += contrastive_loss.item()
-            running_loss_reconstruction += reconstruction_loss.item()
-            running_loss_ranking += ranking_loss.item()
+                running_loss_triplet += triplet_loss.item()
+                running_loss_mse += mse_loss.item()
+                #running_loss_dense += dense_loss.item()
+                #running_loss_ranking += ranking_loss.item()
+                #running_loss_distillation += distillation_loss.item()
+                running_loss_total += total_loss.item()
 
             scaler.scale(total_loss).backward()
+            scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             scaler.step(self.optimizer)
             scaler.update()
-            self.optimizer.zero_grad()
-            
-            update_momentum(self.model.student_backbone, self.model.teacher_backbone, m=current_m)
-            update_momentum(self.model.student_head, self.model.teacher_head, m=current_m)
-            
 
-            # del (
-            #     x_anchor, x_pos_1, x_pos_2,
-            #     embedding_anchor, 
-            #     embedding_pos1, 
-            #     embedding_pos2,
-            #     masked_prediction, masked_GT,
-            #     total_loss, 
-            #     reconstruction_loss,
-            #     ranking_loss
-            # )
             
-            # if self.no_contrastive_loss is False:
-            #     del (
-            #         contrastive_loss
-            #     )
-            
-            # if self.multi_view:
-            #     del (
-            #         embedding_pos3, 
-            #         embedding_pos4
-            #     )
-
         with open(self.log_file, 'a') as f:
-            f.write(f"\nEpoch {epoch}: Total Loss = {running_loss_total/len(self.train_loader):.6f}, Contrastive Loss = {running_loss_contrastive/len(self.train_loader):.6f}, Pos-pos Loss = {running_loss_pos_pos/len(self.train_loader):.6f}, Bi-margin Loss = {running_loss_margin/len(self.train_loader):.6f}, Reconstruction loss = {running_loss_reconstruction/len(self.train_loader):.6f}, Ranking loss = {running_loss_ranking/len(self.train_loader):.6f}\n")
-
-        return running_loss_total/len(self.train_loader), running_loss_contrastive/len(self.train_loader), running_loss_pos_pos/len(self.train_loader), running_loss_margin/len(self.train_loader), running_loss_reconstruction/len(self.train_loader), running_loss_ranking/len(self.train_loader)
+            f.write(f"\nEpoch {epoch}: Total Loss = {running_loss_total/len(self.train_loader):.6f}, Contrastive Loss = {running_loss_contrastive/len(self.train_loader):.6f}, Triplet Loss = {running_loss_triplet/len(self.train_loader):.6f}, MSE loss = {running_loss_mse/len(self.train_loader):.6f}, Positive distance = {running_post_dist/len(self.train_loader):.6f}, Negative distance = {running_neg_dist/len(self.train_loader):.6f}, Margin violations: {running_margin_violations/len(self.train_loader)}, Total k: {total_k} \n")
+        
+        return running_loss_total/len(self.train_loader), running_loss_contrastive/len(self.train_loader), running_loss_triplet/len(self.train_loader), running_loss_mse/len(self.train_loader), prev_margin_violations, running_post_dist/len(self.train_loader), running_neg_dist/len(self.train_loader), running_margin_violations/len(self.train_loader)
     
     def train(self):
         if self.mode == "mae":
@@ -623,22 +718,27 @@ class Trainer:
             train_one_epoch = self.train_one_epoch_dinov2
         elif self.mode == "simMIM":
             train_one_epoch = self.train_one_epoch_simMIM
+        elif self.mode == "DenseCL":
+            train_one_epoch = self.train_one_epoch_densecl
+        elif self.mode == "MSN":
+            train_one_epoch = self.train_one_epoch_msn
         elif self.mode == "SHAM":
             train_one_epoch = self.train_one_epoch_SHAM
 
 
+        prev_margin_violations = 0
         for epoch in range(self.start_epoch, self.epochs):
             print(f"Epoch {epoch}/{self.epochs}")
             if self.mode=="SHAM":
-                total_loss, contrastive_loss, pos_pos_loss, bi_margin_loss, reconstruction_loss, ranking_loss = train_one_epoch(epoch=epoch, momentum_val=self.momentum_ema, scaler=self.scaler)
-                print(f"Total train loss: {total_loss:.6f}, Contrastive Loss: {contrastive_loss:.6f}, Pos-pos Loss: {pos_pos_loss:.6f}, Bi-margin Loss: {bi_margin_loss:.6f}, Reconstruction Loss: {reconstruction_loss:.6f}, Ranking Loss: {ranking_loss:.6f}")
+                total_loss, contrastive_loss, triplet_loss, mse_loss, prev_margin_violations, pos_dis, neg_dis, margin_violation = train_one_epoch(epoch=epoch, momentum_val=self.momentum_ema, scaler=self.scaler, prev_margin_violations=prev_margin_violations)
+                print(f"Total train loss: {total_loss:.6f}, Contrastive Loss: {contrastive_loss:.6f}, Triplet Loss: {triplet_loss:.6f}, MSE Loss: {mse_loss:.6f}, Pos distance: {pos_dis:.6f}, Neg distance: {neg_dis:.6f}, Margin violations: {margin_violation}")
             else:
                 total_loss = train_one_epoch(epoch=epoch, alpha=0, scaler=self.scaler)
                 print(f"Train loss: {total_loss:.4f}")
             if (epoch+1) % 50 == 0:
                 file_name = os.path.join(self.save_path, f"model_ckpt_{epoch}.pth")
                 if self.mode=="SHAM":
-                    self.save_checkpoint(epoch, file_name, total_loss, contrastive_loss, pos_pos_loss, bi_margin_loss, reconstruction_loss)
+                    self.save_checkpoint(epoch, file_name, total_loss, contrastive_loss, triplet_loss, mse_loss)
                 else:
                     checkpoint = {
                         'epoch': epoch,
@@ -653,7 +753,7 @@ class Trainer:
                     
             file_name = os.path.join(self.save_path, f"model_ckpt_latest.pth")
             if self.mode=="SHAM":
-                self.save_checkpoint(epoch, file_name, total_loss, contrastive_loss, pos_pos_loss, bi_margin_loss, reconstruction_loss)
+                self.save_checkpoint(epoch, file_name, total_loss, contrastive_loss, triplet_loss, mse_loss )
             else:
                 checkpoint = {
                     'epoch': epoch,
@@ -668,8 +768,8 @@ class Trainer:
 
         self.writer.close()  # Giải phóng resource
     
-    def save_checkpoint(self, epoch, file_name, total_loss, contrastive_loss, pos_pos_loss, bi_margin_loss, reconstruction_loss):
-    # Move model and optimizer to CPU before saving
+    def save_checkpoint(self, epoch, file_name, total_loss, contrastive_loss, triplet_loss, mse_loss):
+        # Move model and optimizer to CPU before saving
         model_cpu = {k: v.detach().cpu() for k, v in self.model.state_dict().items()}
         optimizer_cpu = {
             'state': {
@@ -689,9 +789,8 @@ class Trainer:
             'args': self.args,
             'Total_loss': total_loss,
             'Contrastive Loss': contrastive_loss,
-            'Pos-pos loss': pos_pos_loss,
-            'Bi-margin loss': bi_margin_loss,
-            'Reconstruction loss': reconstruction_loss,
+            'Triplet loss': triplet_loss,
+            'MSE loss': mse_loss,
         }
 
         print("Saving checkpoint safely to CPU...")

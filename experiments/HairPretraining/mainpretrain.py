@@ -7,17 +7,18 @@ from utils.transform import get_test_transform, get_train_transform, TwoCropTran
 from utils.dataloader import CustomDataset
 import torch
 from torch.utils.data import DataLoader
-from src.backbone import SupConResNet, SimCLR, MAE, DINOv2, SimMIM
-from src.main_backbone import SHAM
+from src.backbone import SupConResNet, SimCLR, MAE, DINOv2, SimMIM, DenseCL, MSN
+from src.main_backbone import SHAM2
 import torch
 import torchvision
 from torch import nn
 from timm.models.vision_transformer import vit_base_patch16_224
 from lightly.transforms.simclr_transform import SimCLRTransform
-from lightly.transforms import MAETransform
+from lightly.transforms import MAETransform, DenseCLTransform
 from lightly.transforms.dino_transform import DINOTransform
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.tensorboard import SummaryWriter
+from lightly.transforms.msn_transform import MSNTransform
 
 
 
@@ -52,9 +53,8 @@ def parse_args():
     parser.add_argument('--temp', type=float, default=0.5, help="temperature for loss function")
 
     # Model option
-    parser.add_argument('--mode', type=str, default='simclr_supcon', choices=['mae', 'simclr', 'simclr_supcon', 'dinov2', 'simMIM', 'SHAM', 'S2R2'])
+    parser.add_argument('--mode', type=str, default='simclr_supcon', choices=['mae', 'simclr', 'simclr_supcon', 'dinov2', 'simMIM', 'SHAM', 'S2R2', "DenseCL", "MSN"])
     parser.add_argument('--model', type=str, default='resnet18', choices = ['resnet18', 'resnet50', "vit_b_16"])
-    parser.add_argument("--SHAM_mode", type=str, default="embedding", choices = ['reconstruction', 'embedding'])
 
     # Optional config
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
@@ -64,23 +64,10 @@ def parse_args():
     # negative sampling
     parser.add_argument("--negative_sampling", action="store_true")
     parser.add_argument('--warm_up_epochs', default=20, type=int, help='Number of warmup epochs for negative sampling')
-    parser.add_argument('--sampling_frequency', type=int, default=30, help="Frequency to sample hard negative")
     parser.add_argument('--ema', type=float, default=0.99)
     
     # retrieval setting
     parser.add_argument('--S2R2', action="store_true", help="Adding S2R2 regularization")
-
-    # supcon setting
-    parser.add_argument('--classes', default=128, type=int, help="Classes for sup con")
-
-    # ViT settings
-    parser.add_argument('--atn_pooling', default=False, type=bool, help='attention pooling for constrative learning')
-
-    # augmentation settings
-    parser.add_argument('--crop_min', default=0.2, type=float, help="crop min for random crop")
-
-    # pooling settings
-    parser.add_argument("--pooling_type", default="max_pooling", type=str, choices=["max_pooling", "mean_pooling", "GeM"])
     
 
     return parser.parse_args()
@@ -120,8 +107,12 @@ def main(args):
     elif args.mode == "simMIM":
         train_transform = MAETransform(input_size=224)
         test_transform = MAETransform(input_size=224)
+    elif args.mode == "MSN":
+        train_transform = MSNTransform()
+    elif args.mode == "DenseCL":
+        train_transform = DenseCLTransform(input_size=224)
     elif args.mode == "SHAM":
-        anchor_transform = MAETransform(input_size=224)
+        anchor_transform = MAETransform(input_size=224, min_scale=0.8)
         pos_transform = SimCLRTransform(input_size=224) 
 
     if args.mode == "simclr_supcon":
@@ -132,8 +123,11 @@ def main(args):
         else:
             train_dataset = CustomDataset(annotations_file=args.train_annotation, img_dir=args.img_dir, transform=train_transform)
 
+    drop_last=False
+    if args.mode == "SHAM":
+        drop_last=True
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size,
-                            shuffle=True, num_workers = args.num_workers, drop_last=False)
+                            shuffle=True, num_workers = args.num_workers, drop_last=drop_last)
     
     if args.mode == "simclr_supcon":
         model = SupConResNet(name=args.model, feat_dim=args.classes)
@@ -144,11 +138,18 @@ def main(args):
         model = MAE(vit) 
     elif args.mode == "dinov2":
         model = DINOv2()
+    elif args.mode == "MSN":
+        vit = torchvision.models.vit_b_16(pretrained=False)
+        model = MSN(vit)
+    elif args.mode == "DenseCL":
+        resnet = torchvision.models.resnet50()
+        backbone = nn.Sequential(*list(resnet.children())[:-2])
+        model = DenseCL(backbone)
     elif args.mode == "simMIM":
         vit = torchvision.models.vit_b_16(pretrained=False)
         model = SimMIM(vit)
     elif args.mode == "SHAM":
-        model = SHAM(mode=args.SHAM_mode, vit=vit_base_patch16_224())
+        model = SHAM2(model=args.model)
 
     test_loader=None
     trainer = Trainer(model, train_loader, test_loader, args)

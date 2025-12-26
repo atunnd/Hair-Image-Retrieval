@@ -699,3 +699,68 @@ class S2R2Loss(nn.Module):
         loss = 1 - ap_q.mean()
         
         return loss
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class DistillationLoss(nn.Module):
+    def __init__(self, reduction="mean"):
+        super().__init__()
+        self.reduction = reduction
+
+    def forward(self, z_student, z_teacher):
+        """
+        Args:
+            z_student: (B, D) - output từ student
+            z_teacher: (B, D) - output từ EMA teacher (no grad)
+        """
+        # Normalize
+        z_student = F.normalize(z_student, dim=1)
+        z_teacher = F.normalize(z_teacher, dim=1)
+
+        # Cosine similarity loss
+        loss = 1.0 - (z_student * z_teacher).sum(dim=1)
+
+        if self.reduction == "mean":
+            return loss.mean()
+        elif self.reduction == "sum":
+            return loss.sum()
+        else:
+            return loss
+
+class DenseLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+        
+    def forward(self, anchor_tokens, pos_tokens, temperature=0.1):
+        """
+        anchor_tokens: (B, K, D)   queries
+        pos_tokens:    (B, K, D)   positives
+        negatives: in-batch
+        """
+        B, K, D = anchor_tokens.shape
+
+        # flatten patches as separate queries
+        q = anchor_tokens.reshape(B * K, D)
+        k_pos = pos_tokens.reshape(B * K, D)
+
+        # positive logits
+        pos_logits = torch.sum(q * k_pos, dim=-1, keepdim=True)  # (BK, 1)
+
+        # negatives: all other positives in batch
+        k_all = k_pos.detach()  # (BK, D)
+        neg_logits = q @ k_all.t()  # (BK, BK)
+
+        # mask self
+        mask = torch.eye(B * K, device=q.device).bool()
+        neg_logits.masked_fill_(mask, float("-inf"))
+
+        logits = torch.cat([pos_logits, neg_logits], dim=1)
+        logits /= temperature
+
+        labels = torch.zeros(B * K, dtype=torch.long, device=q.device)
+
+        loss = F.cross_entropy(logits, labels)
+        return loss

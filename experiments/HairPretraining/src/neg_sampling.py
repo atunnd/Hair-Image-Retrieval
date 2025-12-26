@@ -4,7 +4,6 @@ import numpy as np
 from collections import defaultdict, Counter
 #import faiss
 import os
-from .backbone import OriginSimCLR
 import torchvision
 import torch.nn as nn
 
@@ -215,10 +214,9 @@ import torch
 import torch.nn.functional as F
 
 def NegSamplerStatic(model, batch, metric="cosine", k=7):
-    model.eval()
-
     # create embeddings
-    embeddings, _ = model.forward_momentum(batch)
+    with torch.no_grad():
+        embeddings = model.extract_features_ema(batch)
 
     B, D = embeddings.shape
     

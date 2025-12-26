@@ -12,7 +12,7 @@ python mainpretrain.py \
   --train_annotation /datastore/dragonzakura/QuocAnh/Composed-Image-Retrieval/experiments/HairPretraining/data/data_train.csv \
   --test_annotation /datastore/dragonzakura/QuocAnh/Composed-Image-Retrieval/experiments/HairPretraining/data/data_test.csv \
   --img_dir /datastore/dragonzakura/QuocAnh/Composed-Image-Retrieval/experiments/HairPretraining/hair_regions \
-  --lr 0.0001 \
+  --lr 0.001 \
   --weight_decay 0.0001 \
   --beta1 0.9 \
   --beta2 0.999 \
@@ -21,10 +21,11 @@ python mainpretrain.py \
   --model vit_b_16 \
   --seed 42 \
   --num_workers 8 \
-  --SHAM_mode reconstruction \
-  --multi_view \
-  --continue_training \
-  --checkpoint_folder /datastore/dragonzakura/QuocAnh/Composed-Image-Retrieval/experiments/HairPretraining/output_dir/SHAM_vit_b_16_reconstruction_multi_view_decoder_7_layers
+  --negative_sampling \
+  --warm_up_epochs 2 \
+  #--multi_view \
+  #--continue_training \
+  #--checkpoint_folder /datastore/dragonzakura/QuocAnh/Composed-Image-Retrieval/experiments/HairPretraining/output_dir/SHAM_resnet50_multi_view_hard_negative_mining
   #--warm_up_epochs 30 \
   #--sampling_frequency 0 \
   #  --continue_training \

@@ -35,5 +35,5 @@ def wait_for_best_gpu(min_vram=4000, check_interval=30):
             time.sleep(check_interval)
 
 if __name__ == "__main__":
-    device = wait_for_best_gpu(min_vram=65000, check_interval=2)  # wait until 20GB free
+    device = wait_for_best_gpu(min_vram=30000, check_interval=2)  # wait until 20GB free
     os.system(f"CUDA_VISIBLE_DEVICES={device.split(':')[-1]} sh scripts/pretraining/pretrain_SHAM_reconstruction.sh")

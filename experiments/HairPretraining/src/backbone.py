@@ -13,8 +13,8 @@ from lightly.transforms.dino_transform import DINOTransform
 from lightly.utils.scheduler import cosine_schedule
 
 import copy
-from lightly.models.modules import MAEDecoderTIMM
-from lightly.transforms import MAETransform
+from lightly.models.modules import MAEDecoderTIMM, DenseCLProjectionHead
+from lightly.transforms import MAETransform,  DenseCLTransform
 from lightly.models.utils import deactivate_requires_grad, update_momentum
 from lightly.models.modules.masked_vision_transformer_torchvision import (
     MaskedVisionTransformerTorchvision,
@@ -26,6 +26,9 @@ import torch
 import torch.nn as nn
 import torchvision.models as models
 from .masked_vision_transformer_timm import MaskedVisionTransformerTIMM
+from lightly.utils.scheduler import cosine_schedule
+from lightly.models.modules.heads import MSNProjectionHead
+from lightly.models.modules import MaskedVisionTransformerTorchvision
 
 # Giả định SimCLRProjectionHead (thay bằng lightly nếu dùng)
 # class SimCLRProjectionHead(nn.Module):
@@ -80,6 +83,78 @@ import torchvision
 import torch
 import torch.nn as nn
 import copy
+
+class MSN(nn.Module):
+    def __init__(self, vit):
+        super().__init__()
+
+        self.mask_ratio = 0.15
+        self.backbone = MaskedVisionTransformerTorchvision(vit=vit)
+        self.projection_head = MSNProjectionHead(input_dim=768)
+
+        self.anchor_backbone = copy.deepcopy(self.backbone)
+        self.anchor_projection_head = copy.deepcopy(self.projection_head)
+
+        utils.deactivate_requires_grad(self.backbone)
+        utils.deactivate_requires_grad(self.projection_head)
+
+        self.prototypes = nn.Linear(256, 1024, bias=False).weight
+
+    def forward(self, images):
+        out = self.backbone(images=images)
+        return self.projection_head(out)
+
+    def forward_masked(self, images):
+        batch_size, _, _, width = images.shape
+        seq_length = (width // self.anchor_backbone.vit.patch_size) ** 2
+        idx_keep, _ = utils.random_token_mask(
+            size=(batch_size, seq_length),
+            mask_ratio=self.mask_ratio,
+            device=images.device,
+        )
+        out = self.anchor_backbone(images=images, idx_keep=idx_keep)
+        return self.anchor_projection_head(out)
+
+class DenseCL(nn.Module):
+    def __init__(self, backbone):
+        super().__init__()
+        self.backbone = backbone
+        self.projection_head_global = DenseCLProjectionHead(2048, 2048, 512)
+        self.projection_head_local = DenseCLProjectionHead(2048, 2048, 512)
+
+        self.backbone_momentum = copy.deepcopy(self.backbone)
+        self.projection_head_global_momentum = copy.deepcopy(
+            self.projection_head_global
+        )
+        self.projection_head_local_momentum = copy.deepcopy(self.projection_head_local)
+        self.pool = nn.AdaptiveAvgPool2d((1, 1))
+
+        utils.deactivate_requires_grad(self.backbone_momentum)
+        utils.deactivate_requires_grad(self.projection_head_global_momentum)
+        utils.deactivate_requires_grad(self.projection_head_local_momentum)
+
+    def forward(self, x):
+        query_features = self.backbone(x)
+        query_global = self.pool(query_features).flatten(start_dim=1)
+        query_global = self.projection_head_global(query_global)
+        query_features = query_features.flatten(start_dim=2).permute(0, 2, 1)
+        query_local = self.projection_head_local(query_features)
+        # Shapes: (B, H*W, C), (B, D), (B, H*W, D)
+        return query_features, query_global, query_local
+
+    @torch.no_grad()
+    def forward_momentum(self, x):
+        key_features = self.backbone(x)
+        key_global = self.pool(key_features).flatten(start_dim=1)
+        key_global = self.projection_head_global(key_global)
+        key_features = key_features.flatten(start_dim=2).permute(0, 2, 1)
+        key_local = self.projection_head_local(key_features)
+        return key_features, key_global, key_local
+
+    def extract_features(self, x):
+        x = self.backbone(x)
+        return self.pool(query_features).flatten(start_dim=1)
+
 
 class SimCLR(nn.Module):
     def __init__(self, model=None):

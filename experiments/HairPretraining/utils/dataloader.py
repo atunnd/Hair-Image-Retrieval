@@ -33,21 +33,19 @@ class CustomDataset(Dataset):
         try:
             img_bytes = read_file(img_path)  # Đọc file thành bytes
             image = decode_image(img_bytes, mode=torchvision.io.ImageReadMode.RGB)  # Giữ nguyên RGB
-
             image = to_pil_image(image)  # Nếu cần dùng PIL.Image
             
         except Exception as e:
             print(f"[WARNING] Failed to load image {img_path}: {e}")
 
         if self.our_method:
-            image = self.scale_transform(image)
-            anchor = self.transform(image)[0]
-            pos1, pos2 = self.transform2(image)
+            #anchor = self.transform(image)[0]
+            anchor, pos1 = self.transform2(image)
             if self.multi_view:
-                pos3, pos4 = self.transform2(image)
-                return {"anchor": anchor, "pos1": pos1, "pos2": pos2, "pos3": pos3, "pos4": pos4}
+                pos3, _ = self.transform2(image)
+                return {"anchor": anchor, "pos1": pos1, "pos2": pos2, "pos3": pos3}
             else:
-                return {"anchor": anchor, "pos1": pos1, "pos2": pos2}
+                return {"anchor": anchor, "pos1": pos1}
         else:
             image = self.transform(image)
             return image, label
