@@ -7,6 +7,13 @@ from sklearn.metrics import classification_report, confusion_matrix, accuracy_sc
 import numpy as np
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.linear_model import LogisticRegression
+from torchvision.transforms.functional import to_pil_image
+from torchvision.utils import make_grid
+from PIL import Image
+import csv
+import umap
+import matplotlib.pyplot as plt
+
 
 class Classifier:
     def __init__(self, model, train_loader, test_loader, args):
@@ -118,3 +125,80 @@ class Classifier:
             f.write("="*50 + "\n\n")
 
         print(f"✅ Linear probe results saved in: {file_path}")
+    
+
+    def save_umap(self, split="both", n_neighbors=15, min_dist=0.1, metric="cosine", random_state=42, point_size=5, alpha=0.8):
+        """
+        Vẽ và lưu UMAP từ feature đã extract (SSL embedding).
+
+        Args:
+            split (str): 'train', 'test', hoặc 'both'
+            n_neighbors (int): UMAP n_neighbors
+            min_dist (float): UMAP min_dist
+            metric (str): distance metric
+            random_state (int): để UMAP reproducible
+            point_size (int): size của điểm
+            alpha (float): độ trong suốt
+        """
+
+        print(f"📊 Generating UMAP ({split})")
+
+        # Giống linear_probe_eval → đảm bảo feature đã có
+        self.extracting_features()
+
+        reducer = umap.UMAP(
+            n_neighbors=n_neighbors,
+            min_dist=min_dist,
+            metric=metric,
+            random_state=random_state
+        )
+
+        # ===== Chọn split =====
+        if split == "train":
+            features = self.training_features.numpy()
+            labels = self.training_labels.numpy()
+            title = "UMAP - Training Set"
+            filename = "umap_train.png"
+
+        elif split == "test":
+            features = self.testing_features.numpy()
+            labels = self.testing_labels.numpy()
+            title = "UMAP - Testing Set"
+            filename = "umap_test.png"
+
+        elif split == "both":
+            features = torch.cat(
+                [self.training_features, self.testing_features], dim=0
+            ).numpy()
+            labels = torch.cat(
+                [self.training_labels, self.testing_labels], dim=0
+            ).numpy()
+            title = "UMAP - Train + Test"
+            filename = "umap_train_test.png"
+
+        else:
+            raise ValueError("split must be 'train', 'test', or 'both'")
+
+        # ===== Fit + transform =====
+        embedding_2d = reducer.fit_transform(features)
+
+        # ===== Plot =====
+        plt.figure(figsize=(8, 8))
+        scatter = plt.scatter(
+            embedding_2d[:, 0],
+            embedding_2d[:, 1],
+            c=labels,
+            s=point_size,
+            cmap="tab10",
+            alpha=alpha
+        )
+        plt.colorbar(scatter)
+        plt.title(title)
+        plt.tight_layout()
+
+        # ===== Save =====
+        save_path = os.path.join(self.save_path, filename)
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        plt.close()
+
+        print(f"✅ UMAP saved to: {save_path}")

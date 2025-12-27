@@ -32,7 +32,7 @@ from sklearn.metrics import (
     log_loss
 )
 from functools import partial
-from src.main_backbone import SHAM
+from src.main_backbone import SHAM2
 
 class LayerNorm(nn.LayerNorm):
 
@@ -64,7 +64,7 @@ def parse_args():
     parser.add_argument('--num_workers', type=int, default=4)
 
     # ViT settings
-    parser.add_argument('--eval_type', default=None, type=str, choices=["knn", "linear_prob"])
+    parser.add_argument('--eval_type', default=None, type=str, choices=["knn", "linear_prob", "visualization"])
 
     
     return parser.parse_args()
@@ -134,9 +134,12 @@ def main(args):
         print("✅ Model weights loaded!")
     
     elif args.mode == "SHAM":
-        model = SHAM()
+        model = SHAM2(model = args.model)
         state_dict = torch.load(args.checkpoint_path, map_location=args.device, weights_only=False)
-        model.load_state_dict(state_dict['model_state_dict'])
+        if args.model == "vit_b_16":
+            model.load_state_dict(state_dict['model_state_dict'])
+        else:
+            model.load_state_dict(state_dict)
         print("✅ Model weights loaded!")
 
     elif args.mode == "mae":
@@ -190,6 +193,8 @@ def main(args):
         trainer.knn_eval()
     elif args.eval_type == "linear_prob":
         trainer.linear_probe_eval()
+    elif args.eval_type == "visualization":
+        trainer.save_umap()
 
 if __name__ == "__main__":
     args = parse_args()
