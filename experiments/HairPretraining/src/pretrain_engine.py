@@ -607,7 +607,7 @@ class Trainer:
             # if self.multi_view:
             #     x_pos_3 = images['pos3'].to(self.device) 
             
-            if self.ablation == "None":
+            if self.ablation == "None" or self.ablation == "fixed_margin_0_5" or  self.ablation == "fixed_margin_0_7":
                 if self.warm_up_epochs > epoch + 1:     #STAGE 1: RANDOMLY NEGATIVE MINING
                     negative_samples = NegSamplerRandomly(x_pos_1)
                 else:
