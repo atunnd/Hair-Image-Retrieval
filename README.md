@@ -3,22 +3,16 @@
 Official implementation and benchmark for
 “A Self-Supervised Framework for Robust Hair-Centric Image Retrieval”
 
-📄 Paper: to appear
-📊 Benchmark: Hair-Centric Image Retrieval (Coarse & Fine-grained)
 🧠 Method: SHAM (Self-supervised Hard-negative curriculum Mining)
 
 ## 🔍 Overview
 
 This repository provides:
-1. Hair-Centric Image Retrieval Benchmarks
-- Coarse-grained retrieval (hairstyle category level)
-- Fine-grained retrieval (instance-level similarity)
+1. SHAM, a self-supervised learning framework tailored for hair-centric representation learning
 
-2. SHAM, a self-supervised learning framework tailored for hair-centric representation learning
+2. Training & evaluation code for multiple backbones (ResNet, ViT)
 
-3. Training & evaluation code for multiple backbones (ResNet, ViT)
-
-4. Scripts for reproducible experiments and evaluation
+3. Scripts for reproducible experiments and evaluation
 
 ## Code Structure
 1. The main training code for SSL is in folder HairPretraining
@@ -68,3 +62,13 @@ HairPretraining/
 ├── mainpretrain.py                   # Entry point pretraining
 ├── knn_classification.py             # Run kNN evaluation
 ```
+
+# ⚙️ Installation
+``` text
+git clone https://github.com/atunnd/Hair-centric-Image-Retrieval.git
+conda create -n hair_ci python=3.9
+conda activate hair_ci
+pip install -r requirements.txt
+cd HairPretraining
+```
+
