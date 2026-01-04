@@ -1,0 +1,282 @@
+import torch
+import os
+import torch
+import torch.nn as nn
+from tqdm import tqdm
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+import numpy as np
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.linear_model import LogisticRegression
+from torchvision.transforms.functional import to_pil_image
+from torchvision.utils import make_grid
+from PIL import Image
+import csv
+import umap
+import matplotlib.pyplot as plt
+
+
+class Classifier:
+    def __init__(self, model, train_loader, test_loader, args):
+        self.model = model.to(args.device)
+        self.train_loader = train_loader
+        self.test_loader = test_loader
+        self.device = args.device
+        self.mode = args.mode
+        self.mode_model = args.model
+        self.device = args.device
+
+        if args.mode == "SHAM":
+            self.save_path = os.path.join(args.save_path, f"{self.mode}_{self.mode_model}_{args.SHAM_mode}")
+        else:
+            self.save_path = os.path.join(args.save_path, f"{self.mode}_{self.mode_model}")
+        os.makedirs(self.save_path, exist_ok=True)
+        self.training_features = []
+        self.training_labels = []
+        self.testing_features = []
+        self.testing_labels = []
+
+    
+    def extracting_features(self):
+        self.model.eval()
+
+        with torch.no_grad():
+            for batch in tqdm(self.train_loader, desc="Extracting training features"):
+                images, labels = batch[0], batch[1]
+                #print("images: ", images.shape)
+                #print("label: ", labels.shape)
+                x0= images
+                x0 = x0.to(self.device)
+                training_features = self.model.extract_features(x0)
+                training_features = torch.nn.functional.normalize(training_features, dim=1)
+                self.training_features.append(training_features.cpu())
+                self.training_labels.append(labels)
+
+        with torch.no_grad():
+            for batch in tqdm(self.test_loader, desc="Extracting testing features"):
+                images, labels = batch[0], batch[1]
+                #print("images: ", images.shape)
+                #print("label: ", labels.shape)
+                x0 = images
+                x0 = x0.to(self.device)
+                testing_features = self.model.extract_features(x0)
+                testing_features = torch.nn.functional.normalize(testing_features, dim=1)
+                self.testing_features.append(testing_features.cpu())
+                self.testing_labels.append(labels)
+        
+        self.training_features = torch.cat(self.training_features)
+        self.training_labels = torch.cat(self.training_labels)
+        self.testing_features = torch.cat(self.testing_features)
+        self.testing_labels = torch.cat(self.testing_labels)
+
+    def knn_eval(self, ks=(5, 10, 20, 27, 30, 40, 642)):
+        print(f"Evaluating on KNN classifier with {self.device}")
+        self.extracting_features()
+        file_path = os.path.join(self.save_path, "knn_evaluation_results.txt")
+        with open(file_path, "w") as f:
+            f.write("KNN Evaluation Results\n")
+            f.write("="*50 + "\n\n")
+
+        for k in ks:
+            knn = KNeighborsClassifier(n_neighbors=k, metric="cosine")
+            knn.fit(self.training_features, self.training_labels)
+            y_pred = knn.predict(self.testing_features)
+            acc = accuracy_score(self.testing_labels, y_pred)
+            report = classification_report(self.testing_labels, y_pred)
+            cm = confusion_matrix(self.testing_labels, y_pred)
+
+            with open(file_path, "a") as f:  # append thêm kết quả
+                f.write(f"Results for k={k}\n")
+                f.write("-"*40 + "\n")
+                f.write(f"Accuracy: {acc:.4f}\n\n")
+                f.write("Classification Report:\n")
+                f.write(report + "\n\n")
+                f.write("Confusion Matrix:\n")
+                f.write(np.array2string(cm) + "\n\n")
+                f.write("="*50 + "\n\n")
+
+            print(f"✅ Appended results for k={k}")
+        print(f"\n📂 All results saved in: {file_path}")
+    
+    
+    def linear_probe_eval(self):
+        print(f"Evaluating with Linear Probe on {self.device}")
+        self.extracting_features()
+        file_path = os.path.join(self.save_path, "linear_probe_results.txt")
+
+        # Logistic regression (multi-class, one-vs-rest)
+        clf = LogisticRegression(
+            max_iter=5000, solver="lbfgs", multi_class="multinomial"
+        )
+        clf.fit(self.training_features, self.training_labels)
+        y_pred = clf.predict(self.testing_features)
+
+        acc = accuracy_score(self.testing_labels, y_pred)
+        report = classification_report(self.testing_labels, y_pred)
+        cm = confusion_matrix(self.testing_labels, y_pred)
+
+        with open(file_path, "w") as f:
+            f.write("Linear Probe Evaluation Results\n")
+            f.write("="*50 + "\n\n")
+            f.write(f"Accuracy: {acc:.4f}\n\n")
+            f.write("Classification Report:\n")
+            f.write(report + "\n\n")
+            f.write("Confusion Matrix:\n")
+            f.write(np.array2string(cm) + "\n\n")
+            f.write("="*50 + "\n\n")
+
+        print(f"✅ Linear probe results saved in: {file_path}")
+    
+
+    def save_umap(self, split="both", n_neighbors=15, min_dist=0.1, metric="cosine", random_state=42, point_size=5, alpha=0.8):
+        """
+        Vẽ và lưu UMAP từ feature đã extract (SSL embedding).
+
+        Args:
+            split (str): 'train', 'test', hoặc 'both'
+            n_neighbors (int): UMAP n_neighbors
+            min_dist (float): UMAP min_dist
+            metric (str): distance metric
+            random_state (int): để UMAP reproducible
+            point_size (int): size của điểm
+            alpha (float): độ trong suốt
+        """
+
+        print(f"📊 Generating UMAP ({split})")
+
+        # Giống linear_probe_eval → đảm bảo feature đã có
+        self.extracting_features()
+
+        reducer = umap.UMAP(
+            n_neighbors=n_neighbors,
+            min_dist=min_dist,
+            metric=metric,
+            random_state=random_state
+        )
+
+        # ===== Chọn split =====
+        if split == "train":
+            features = self.training_features.numpy()
+            labels = self.training_labels.numpy()
+            title = "UMAP - Training Set"
+            filename = "umap_train.png"
+
+        elif split == "test":
+            features = self.testing_features.numpy()
+            labels = self.testing_labels.numpy()
+            title = "UMAP - Testing Set"
+            filename = "umap_test.png"
+
+        elif split == "both":
+            features = torch.cat(
+                [self.training_features, self.testing_features], dim=0
+            ).numpy()
+            labels = torch.cat(
+                [self.training_labels, self.testing_labels], dim=0
+            ).numpy()
+            title = "UMAP - Train + Test"
+            filename = "umap_train_test.png"
+
+        else:
+            raise ValueError("split must be 'train', 'test', or 'both'")
+
+        # ===== Fit + transform =====
+        embedding_2d = reducer.fit_transform(features)
+
+        # ===== Plot =====
+        plt.figure(figsize=(8, 8))
+        scatter = plt.scatter(
+            embedding_2d[:, 0],
+            embedding_2d[:, 1],
+            c=labels,
+            s=point_size,
+            cmap="tab10",
+            alpha=alpha
+        )
+        plt.colorbar(scatter)
+        plt.title(title)
+        plt.tight_layout()
+
+        # ===== Save =====
+        save_path = os.path.join(self.save_path, filename)
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        plt.close()
+
+        print(f"✅ UMAP saved to: {save_path}")
+    
+    def compute_intra_inter_variance(self, split="test"):
+        """
+        Compute intra-class variance, inter-class variance and their ratio
+        on the SSL embedding space.
+
+        Args:
+            split (str): 'train' or 'test'
+
+        Returns:
+            dict with intra_var, inter_var, ratio
+        """
+        print(f"📐 Computing intra/inter-class variance on {split} set")
+
+        # Ensure features are extracted
+        self.extracting_features()
+
+        if split == "train":
+            features = self.training_features  # (N, D)
+            labels = self.training_labels
+        elif split == "test":
+            features = self.testing_features
+            labels = self.testing_labels
+        elif split == "both":
+            features = torch.cat(
+                [self.training_features, self.testing_features], dim=0
+            )
+            labels = torch.cat(
+                [self.training_labels, self.testing_labels], dim=0
+            )
+        else:
+            raise ValueError("split must be 'train' or 'test'")
+
+        features = features.numpy()
+        labels = labels.numpy()
+
+        unique_classes = np.unique(labels)
+
+        # Global mean
+        global_mean = np.mean(features, axis=0)
+
+        intra_var = 0.0
+        inter_var = 0.0
+
+        for c in unique_classes:
+            class_feats = features[labels == c]
+            class_mean = np.mean(class_feats, axis=0)
+
+            # Intra-class variance
+            intra_var += np.mean(np.sum((class_feats - class_mean) ** 2, axis=1))
+
+            # Inter-class variance
+            inter_var += np.sum((class_mean - global_mean) ** 2)
+
+        intra_var /= len(unique_classes)
+        inter_var /= len(unique_classes)
+
+        ratio = inter_var / (intra_var + 1e-8)
+
+        results = {
+            "intra_class_variance": intra_var,
+            "inter_class_variance": inter_var,
+            "variance_ratio": ratio
+        }
+
+        # Save results
+        save_file = os.path.join(self.save_path, f"variance_analysis_{split}.txt")
+        with open(save_file, "w") as f:
+            f.write("Embedding Geometry Analysis\n")
+            f.write("=" * 50 + "\n")
+            for k, v in results.items():
+                f.write(f"{k}: {v:.6f}\n")
+
+        print(f"✅ Variance analysis saved to: {save_file}")
+        print(results)
+
+        return results
+

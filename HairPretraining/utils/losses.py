@@ -1,0 +1,766 @@
+from __future__ import print_function
+
+import torch
+import torch.nn as nn
+from typing import Optional
+
+
+class SupConLoss(nn.Module):
+    """Supervised Contrastive Learning: https://arxiv.org/pdf/2004.11362.pdf.
+    It also supports the unsupervised contrastive loss in SimCLR"""
+    def __init__(self, temperature=0.07, contrast_mode='all',
+                 base_temperature=0.07):
+        super(SupConLoss, self).__init__()
+        self.temperature = temperature
+        self.contrast_mode = contrast_mode
+        self.base_temperature = base_temperature
+
+    def forward(self, features, labels=None, mask=None):
+        """Compute loss for model. If both `labels` and `mask` are None,
+        it degenerates to SimCLR unsupervised loss:
+        https://arxiv.org/pdf/2002.05709.pdf
+
+        Args:
+            features: hidden vector of shape [bsz, n_views, ...].
+            labels: ground truth of shape [bsz].
+            mask: contrastive mask of shape [bsz, bsz], mask_{i,j}=1 if sample j
+                has the same class as sample i. Can be asymmetric.
+        Returns:
+            A loss scalar.
+        """
+        device = features.device
+
+        if len(features.shape) < 3:
+            raise ValueError('`features` needs to be [bsz, n_views, ...],'
+                             'at least 3 dimensions are required')
+        if len(features.shape) > 3:
+            features = features.view(features.shape[0], features.shape[1], -1)
+
+        batch_size = features.shape[0]
+        if labels is not None and mask is not None:
+            raise ValueError('Cannot define both `labels` and `mask`')
+        elif labels is None and mask is None:
+            mask = torch.eye(batch_size, dtype=torch.float32).to(device)
+        elif labels is not None:
+            labels = labels.contiguous().view(-1, 1)
+            if labels.shape[0] != batch_size:
+                raise ValueError('Num of labels does not match num of features')
+            mask = torch.eq(labels, labels.T).float().to(device)
+        else:
+            mask = mask.float().to(device)
+
+        contrast_count = features.shape[1]
+        contrast_feature = torch.cat(torch.unbind(features, dim=1), dim=0)
+        if self.contrast_mode == 'one':
+            anchor_feature = features[:, 0]
+            anchor_count = 1
+        elif self.contrast_mode == 'all':
+            anchor_feature = contrast_feature
+            anchor_count = contrast_count
+        else:
+            raise ValueError('Unknown mode: {}'.format(self.contrast_mode))
+
+        # compute logits
+        anchor_dot_contrast = torch.div(
+            torch.matmul(anchor_feature, contrast_feature.T),
+            self.temperature)
+        # for numerical stability
+        logits_max, _ = torch.max(anchor_dot_contrast, dim=1, keepdim=True)
+        logits = anchor_dot_contrast - logits_max.detach()
+
+        # tile mask
+        mask = mask.repeat(anchor_count, contrast_count)
+        # mask-out self-contrast cases
+        logits_mask = torch.scatter(
+            torch.ones_like(mask),
+            1,
+            torch.arange(batch_size * anchor_count).view(-1, 1).to(device),
+            0
+        )
+        mask = mask * logits_mask
+
+        # compute log_prob
+        exp_logits = torch.exp(logits) * logits_mask
+        log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True))
+
+        # compute mean of log-likelihood over positive
+        # modified to handle edge cases when there is no positive pair
+        # for an anchor point. 
+        # Edge case e.g.:- 
+        # features of shape: [4,1,...]
+        # labels:            [0,1,1,2]
+        # loss before mean:  [nan, ..., ..., nan] 
+        mask_pos_pairs = mask.sum(1)
+        mask_pos_pairs = torch.where(mask_pos_pairs < 1e-6, 1, mask_pos_pairs)
+        mean_log_prob_pos = (mask * log_prob).sum(1) / mask_pos_pairs
+
+        # loss
+        loss = - (self.temperature / self.base_temperature) * mean_log_prob_pos
+        loss = loss.view(anchor_count, batch_size).mean()
+
+        return loss
+    
+class Negative_centroid_loss(nn.Module):
+    pass
+
+
+
+import warnings
+
+import torch
+import torch.nn.functional as F
+from torch import Tensor
+from torch.nn import Module, Parameter
+
+from lightly.models.modules import center
+from lightly.models.modules.center import CENTER_MODE_TO_FUNCTION
+
+
+class DINOLoss(Module):
+    """Implementation of the loss described in 'Emerging Properties in
+    Self-Supervised Vision Transformers'. [0]
+
+    This implementation follows the code published by the authors. [1]
+    It supports global and local image crops. A linear warmup schedule for the
+    teacher temperature is implemented to stabilize training at the beginning.
+    Centering is applied to the teacher output to avoid model collapse.
+
+    - [0]: DINO, 2021, https://arxiv.org/abs/2104.14294
+    - [1]: https://github.com/facebookresearch/dino
+
+    Attributes:
+        output_dim:
+            Dimension of the model output.
+        teacher_temp:
+            Temperature parameter for the teacher network.
+        student_temp:
+            Temperature parameter for the student network.
+        center:
+            Center used for the teacher output. It is updated with a moving average
+            during training.
+        center_momentum:
+            Momentum term for the center calculation.
+        warmup_teacher_temp_epochs:
+                Number of epochs for the warmup phase of the teacher temperature (for backward compatibility).
+        teacher_temp_schedule:
+            A linear schedule for the teacher temperature during the warmup phase (for backward compatibility).
+
+    Examples:
+        >>> # initialize loss function
+        >>> loss_fn = DINOLoss(128)
+        >>>
+        >>> # generate a view of the images with a random transform
+        >>> view = transform(images)
+        >>>
+        >>> # embed the view with a student and teacher model
+        >>> teacher_out = teacher(view)
+        >>> student_out = student(view)
+        >>>
+        >>> # calculate loss
+        >>> loss = loss_fn([teacher_out], [student_out])
+    """
+
+    def __init__(
+        self,
+        output_dim: int = 65536,
+        warmup_teacher_temp: float = 0.04,
+        teacher_temp: float = 0.04,
+        warmup_teacher_temp_epochs: int = 30,
+        student_temp: float = 0.1,
+        center_momentum: float = 0.9,
+        center_mode: str = "mean",
+    ) -> None:
+        """Initializes the DINOLoss Module.
+
+        Args:
+            center_mode:
+                Mode for center calculation. Only 'mean' is supported.
+            warmup_teacher_temp:
+                Initial temperature for the teacher network (for backward compatibility).
+            warmup_teacher_temp_epochs:
+                Number of epochs for the warmup phase of the teacher temperature (for backward compatibility).
+        """
+        super().__init__()
+
+        self.teacher_temp = teacher_temp
+        self.student_temp = student_temp
+
+        # TODO(Guarin, 08/24): Refactor this to use the Center module directly once
+        # we do a breaking change.
+        if center_mode not in CENTER_MODE_TO_FUNCTION:
+            raise ValueError(
+                f"Unknown mode '{center_mode}'. Valid modes are "
+                f"{sorted(CENTER_MODE_TO_FUNCTION.keys())}."
+            )
+        self._center_fn = CENTER_MODE_TO_FUNCTION[center_mode]
+        self.center: Parameter
+        self.register_buffer("center", torch.zeros(1, 1, output_dim))
+        self.center_momentum = center_momentum
+
+        # comput the warmup teacher temperature internally for backward compatibility
+        self.warmup_teacher_temp_epochs = warmup_teacher_temp_epochs
+        self.teacher_temp_schedule = torch.linspace(
+            start=warmup_teacher_temp,
+            end=teacher_temp,
+            steps=warmup_teacher_temp_epochs,
+        )
+
+    def forward(
+        self,
+        teacher_out,
+        student_out,
+        teacher_temp= None,
+        epoch = None,
+    ) -> Tensor:
+        """Cross-entropy between softmax outputs of the teacher and student networks.
+
+        Args:
+            teacher_out:
+                List of tensors with shape (batch_size, output_dim) containing features
+                from the teacher model. Each tensor must represent one view of the
+                batch.
+            student_out:
+                List of tensors with shape (batch_size, output_dim) containing features
+                from the student model. Each tensor must represent one view of the
+                batch.
+            teacher_temp:
+                The temperature used for the teacher output. If None, the default
+                temperature defined in __init__ is used.
+            epoch:
+                The current epoch for backward compatibility.
+
+        Returns:
+            The average cross-entropy loss.
+        """
+
+        # Get teacher temperature
+        device = teacher_out[0].device
+        self.center = self.center.to(device)
+        if teacher_temp is not None:
+            teacher_temperature = torch.tensor(teacher_temp).to(device)
+        elif epoch is not None:  # for backward compatibility
+            if epoch < self.warmup_teacher_temp_epochs:
+                teacher_temperature = self.teacher_temp_schedule[epoch].to(device)
+            else:
+                teacher_temperature = torch.tensor(self.teacher_temp).to(device)
+        else:
+            teacher_temperature = torch.tensor(self.teacher_temp).to(device)
+
+        # Calculate cross-entropy loss.
+        teacher_out_stacked = torch.stack(teacher_out)
+        t_out: Tensor = F.softmax(
+            (teacher_out_stacked - self.center) / teacher_temperature, dim=-1
+        )
+        student_out_stacked = torch.stack(student_out)
+        s_out = F.log_softmax(student_out_stacked / self.student_temp, dim=-1)
+
+        # Calculate feature similarities, ignoring the diagonal
+        # b = batch_size, t = n_views_teacher, s = n_views_student, d = output_dim
+        loss = -torch.einsum("tbd,sbd->ts", t_out, s_out)
+        loss.fill_diagonal_(0)
+
+        # Number of loss terms, ignoring the diagonal
+        n_terms = loss.numel() - loss.diagonal().numel()
+        batch_size = teacher_out_stacked.shape[1]
+
+        loss = loss.sum() / (n_terms * batch_size)
+
+        # Update the center used for the teacher output
+        self.update_center(teacher_out_stacked)
+
+        return loss
+
+    @torch.no_grad()
+    def update_center(self, teacher_out: Tensor) -> None:
+        """Moving average update of the center used for the teacher output.
+
+        Args:
+            teacher_out:
+                Tensor with shape (num_views, batch_size, output_dim) containing
+                features from the teacher model.
+        """
+
+        # Calculate the batch center using the specified center function
+        batch_center = self._center_fn(x=teacher_out, dim=(0, 1))
+
+        # Update the center with a moving average
+        self.center.data = center.center_momentum(
+            center=self.center, batch_center=batch_center, momentum=self.center_momentum
+        )
+
+import torch
+from torch import Tensor
+from torch.nn import Module
+from torch.nn import functional as F
+
+from lightly.models.modules.center import Center
+
+
+from typing import Tuple
+
+import torch
+import torch.distributed as dist
+from torch import Tensor
+from torch.nn import Module
+
+
+class Center(Module):
+    """Center module to compute and store the center of a feature tensor as used
+    in DINO [0].
+
+    - [0]: DINO, 2021, https://arxiv.org/abs/2104.14294
+
+    Attributes:
+        size:
+            Size of the tracked center tensor. Dimensions across which the center
+            is computed must be set to 1. For example, if the feature tensor has shape
+            (batch_size, sequence_length, feature_dim) and the center should be computed
+            across the batch and sequence dimensions, the size should be
+            (1, 1, feature_dim).
+        mode:
+            Mode to compute the center. Currently only 'mean' is supported.
+        momentum:
+            Momentum term for the center calculation.
+    """
+
+    def __init__(
+        self,
+        size: Tuple[int, ...],
+        mode: str = "mean",
+        momentum: float = 0.9,
+    ) -> None:
+        """Initializes the Center module with the specified parameters.
+
+        Raises:
+            ValueError: If an unknown mode is provided.
+        """
+        super().__init__()
+
+        center_fn = CENTER_MODE_TO_FUNCTION.get(mode)
+        if center_fn is None:
+            raise ValueError(
+                f"Unknown mode '{mode}'. Valid modes are "
+                f"{sorted(CENTER_MODE_TO_FUNCTION.keys())}."
+            )
+        self._center_fn = center_fn
+
+        self.size = size
+        self.dim = tuple(i for i, s in enumerate(size) if s == 1)
+        self.center: Tensor  # For mypy
+        self.register_buffer("center", torch.zeros(self.size))
+        self.momentum = momentum
+
+    @property
+    def value(self) -> Tensor:
+        """The current value of the center.
+
+        Use this property to do any operations based on the center.
+        """
+        return self.center
+
+    @torch.no_grad()
+    def update(self, x: Tensor) -> None:
+        """Update the center with a new batch of features.
+
+        Args:
+            x:
+                Feature tensor used to update the center. Must have the same number of
+                dimensions as self.size.
+        """
+        device=x.device
+        batch_center = self._center_fn(x=x, dim=self.dim)
+        self.center = self.center.to(device)
+        self.center = center_momentum(
+            center=self.center, batch_center=batch_center, momentum=self.momentum
+        )
+
+    @torch.no_grad()
+    def _center_mean(self, x: Tensor) -> Tensor:
+        """Returns the center of the input tensor by calculating the mean."""
+        return center_mean(x=x, dim=self.dim)
+
+
+@torch.no_grad()
+def center_mean(x: Tensor, dim: Tuple[int, ...]) -> Tensor:
+    """Returns the center of the input tensor by calculating the mean.
+
+    Args:
+        x:
+            Input tensor.
+        dim:
+            Dimensions along which the mean is calculated.
+
+    Returns:
+        The center of the input tensor.
+    """
+    batch_center = torch.mean(x, dim=dim, keepdim=True)
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(batch_center)
+        batch_center = batch_center / dist.get_world_size()
+    return batch_center
+
+
+@torch.no_grad()
+def center_momentum(center: Tensor, batch_center: Tensor, momentum: float) -> Tensor:
+    """Returns the new center with momentum update."""
+    return center * momentum + batch_center * (1 - momentum)
+
+
+CENTER_MODE_TO_FUNCTION = {
+    "mean": center_mean,
+}
+
+# class IBOTPatchLoss(Module):
+#     """Implementation of the iBOT patch loss [0] as used in DINOv2 [1].
+
+#     Implementation is based on [2].
+
+#     - [0]: iBOT, 2021, https://arxiv.org/abs/2111.07832
+#     - [1]: DINOv2, 2023, https://arxiv.org/abs/2304.07193
+#     - [2]: https://github.com/facebookresearch/dinov2/blob/main/dinov2/loss/ibot_patch_loss.py
+
+#     Attributes:
+#         output_dim:
+#             Dimension of the model output.
+#         teacher_temp:
+#             Temperature for the teacher output.
+#         student_temp:
+#             Temperature for the student output.
+#         center_mode:
+#             Mode for center calculation. Only 'mean' is supported.
+#         center_momentum:
+#             Momentum term for the center update.
+#     """
+
+#     def __init__(
+#         self,
+#         output_dim: int = 65536,
+#         teacher_temp: float = 0.04,
+#         student_temp: float = 0.1,
+#         center_mode: str = "mean",
+#         center_momentum: float = 0.9,
+#     ) -> None:
+#         """Initializes the iBOTPatchLoss module with the specified parameters."""
+#         super().__init__()
+
+#         self.teacher_temp = teacher_temp
+#         self.student_temp = student_temp
+
+#         self.center = Center(
+#             size=(1, output_dim),
+#             mode=center_mode,
+#             momentum=center_momentum,
+#         )
+
+#     def forward(
+#         self,
+#         teacher_out: Tensor,
+#         student_out: Tensor,
+#         mask: Tensor,
+#         teacher_temp: float | None = None,
+#     ) -> Tensor:
+#         """Forward pass through the iBOT patch loss.
+
+#         Args:
+#             teacher_out:
+#                 Tensor with shape (batch_size * sequence_length, embed_dim) containing
+#                 the teacher output of the masked tokens.
+#             student_out:
+#                 Tensor with shape (batch_size * sequence_length, embed_dim) containing
+#                 the student output of the masked tokens.
+#             mask:
+#                 Boolean tensor with shape (batch_size, height, width) containing the
+#                 token mask. Exactly batch_size * sequence_length entries must be set to
+#                 True in the mask.
+#             teacher_temp:
+#                 The temperature used for the teacher output. If None, the default
+#                 temperature defined in __init__ is used.
+
+#         Returns:
+#             The loss value.
+#         """
+#         # B = batch size, N = sequence length = number of masked tokens, D = embed dim
+#         # H = height (in tokens), W = width (in tokens)
+#         # Note that N <= H * W depending on how many tokens are masked.
+
+#         device = teacher_out.device
+#         center_value = self.center.value.to(device)
+
+#         teacher_temperature = torch.tensor(
+#             teacher_temp if teacher_temp is not None else self.teacher_temp
+#         )
+
+#         # Calculate cross-entropy loss.
+#         teacher_softmax = F.softmax(
+#             (teacher_out - center_value) / teacher_temperature, dim=-1
+#         )
+#         student_log_softmax = F.log_softmax(student_out / self.student_temp, dim=-1)
+
+#         # (B * N, D) -> (B * N)
+#         loss = -torch.sum(teacher_softmax * student_log_softmax, dim=-1)
+
+#         # Get weights.
+#         # (B, H, W) -> (B, 1, 1)
+#         num_masked_per_image = mask.sum(dim=(1, 2), keepdim=True).clamp(min=1.0)
+#         # (B, 1, 1) -> (B, H, W) -> (B * N)
+#         weight = (1.0 / num_masked_per_image).expand_as(mask)[mask]
+
+#         # Apply weighting.
+#         B = mask.shape[0]
+#         loss = (loss * weight).sum() / B
+
+#         self.center.update(teacher_out)
+
+#         return loss
+
+
+import torch
+import torch.nn.functional as F
+from lightly.loss.ntx_ent_loss import NTXentLoss
+
+class PatchContrastiveLoss(torch.nn.Module):
+    def __init__(self, temperature=0.5):
+        super().__init__()
+        self.loss_fn = NTXentLoss(temperature=temperature)
+
+    def forward(self, patch_s, patch_t):
+        """
+        patch_s: [B, N, D]  -> student patches
+        patch_t: [B, N, D]  -> teacher patches
+        """
+
+        B, N, D = patch_s.shape
+        total_loss = 0.0
+
+        # Compute loss per sample (same as your logic)
+        for i in range(B):
+            total_loss += self.loss_fn(patch_s[i], patch_t[i])
+
+        return total_loss / B
+
+import torch
+import torch.nn.functional as F
+
+def positive_consistency_loss_margin(pos1, pos2, m_p=0.5, reduction='mean'):
+    # Euclidean distance
+    dist = torch.norm(pos1 - pos2, dim=1)   # L2 distance
+
+    # softplus(d - m_p)
+    loss = F.softplus(dist - m_p)
+
+    if reduction == 'mean':
+        return loss.mean()
+    elif reduction == 'sum':
+        return loss.sum()
+    return loss
+
+    
+import torch
+import torch.nn.functional as F
+
+def bidirectional_margin_loss(anchor, pos1, pos2, m_p=0.1, reduction='mean'):
+    # Euclidean distances
+    d_up1 = torch.norm(anchor - pos1, dim=1)
+    d_up2 = torch.norm(anchor - pos2, dim=1)
+    #d_un  = torch.norm(anchor - neg,   dim=1)
+
+    # Positive pairs: want d_small
+    term1 = F.softplus(d_up1 - m_p)
+    term2 = F.softplus(d_up2 - m_p)
+
+    # Negative pair: want d_large
+    term3 = F.softplus(m_n - d_un)
+
+    loss = term1 + term2 + term3
+
+    if reduction == 'mean':
+        return loss.mean()
+    elif reduction == 'sum':
+        return loss.sum()
+    return loss
+
+import torch
+import torch.nn.functional as F
+
+def nt_xent_1anchor_2positive(u, p1, p2, tau=0.5):
+    """
+    NT-Xent loss with 1 anchor and 2 positives
+
+    Args:
+        u: [N, C] normalized anchor embeddings
+        p1: [N, C] normalized positive 1 embeddings
+        p2: [N, C] normalized positive 2 embeddings
+        tau: temperature coefficient
+    Returns:
+        scalar loss
+    """
+    # ------- Positive term -------
+    # cosine similarity between anchor and positives
+    sim_u_p1 = (u * p1.detach()).sum(dim=-1)  # [N]
+    sim_u_p2 = (u * p2.detach()).sum(dim=-1)  # [N]
+    loss_pos = -(sim_u_p1 + sim_u_p2) / 2  # average over two positives
+
+    # ------- Negative term -------
+    # compute similarity between anchor and all positives in batch
+    # concatenate p1 and p2 to treat all as potential negatives
+    all_pos = torch.cat([p1, p2], dim=0)  # [2N, C]
+    sim_matrix = u @ all_pos.T  # [N, 2N]
+    weight = F.softmax(sim_matrix / tau, dim=-1)  # softmax over all positives
+    # negative contribution
+    loss_neg = (weight @ all_pos.detach() * u).sum(dim=-1)  # [N]
+
+    # ------- Total loss -------
+    loss = (loss_pos + loss_neg / tau).mean()
+    return loss
+
+class S2R2Loss(nn.Module):
+    def __init__(self, tau=0.01, k_views=3):
+        """
+        S2R2 Loss (Smooth-AP Approximation) - Modified for Concat Input.
+        
+        Args:
+            tau (float): Nhiệt độ (temperature) cho hàm sigmoid.
+            k_views (int): Số lượng view của mỗi ảnh.
+        """
+        super(S2R2Loss, self).__init__()
+        self.tau = tau
+        self.k_views = k_views
+
+    def forward(self, embeddings, targets=None):
+        """
+        Args:
+            embeddings: Tensor kích thước (Batch_Size * K, Embed_Dim).
+                        Cấu trúc mong đợi: [All_View_1, All_View_2, ..., All_View_K]
+                        Ví dụ: torch.cat([features_v1, features_v2], dim=0)
+            targets:    (Optional) Nhãn thực tế.
+        """
+        
+        # 1. Chuẩn bị dữ liệu
+        embeddings = F.normalize(embeddings, p=2, dim=1)
+        
+        device = embeddings.device
+        dtype = embeddings.dtype
+        n = embeddings.shape[0] # Tổng số vector (B * K)
+
+        # --- PHẦN SỬA ĐỔI QUAN TRỌNG ---
+        # Nếu không có targets, tự tạo dựa trên giả định input là Concat của các View
+        if targets is None:
+            batch_size = n // self.k_views
+            
+            # Tạo nhãn [0, 1, 2, ..., B-1]
+            base_targets = torch.arange(batch_size, device=device)
+            
+            # Lặp lại toàn bộ chuỗi k lần. 
+            # Kết quả: [0, 1, ..., B-1, 0, 1, ..., B-1]
+            # Tương ứng với: [View1_Img1...View1_ImgB, View2_Img1...View2_ImgB]
+            targets = base_targets.repeat(self.k_views)
+        # -------------------------------
+
+        # 2. Tính Ma trận Similarity (Cosine)
+        sim_mat = torch.matmul(embeddings, embeddings.T) # (N, N)
+
+        # 3. Tạo Mask Positive/Negative
+        # targets giống nhau => Positive
+        pos_mask = torch.eq(targets.view(-1, 1), targets.view(1, -1)).type(dtype)
+        
+        # Loại bỏ đường chéo (chính nó)
+        diag_mask = torch.eye(n, device=device, dtype=dtype)
+        pos_mask -= diag_mask 
+        
+        # Mask cho tất cả các ảnh trừ chính nó (Mẫu số)
+        all_mask = 1.0 - diag_mask
+
+        # 4. Tính toán Ranking (Differentiable)
+        # sim_diff[q, i, j] = sim(q, j) - sim(q, i)
+        # Lưu ý: Đoạn này tốn bộ nhớ O(N^3). Nếu N > 1024 có thể cần loop.
+        sim_diff = sim_mat.unsqueeze(1) - sim_mat.unsqueeze(2) 
+        
+        # Sigmoid xấp xỉ hàm chỉ thị
+        sigmoid_diff = torch.sigmoid(sim_diff / self.tau)
+
+        # 5. Tính Rank Rq(i, X)
+        # Rank trong tập Positive (Tử số)
+        rank_pos = 1 + (sigmoid_diff * pos_mask.unsqueeze(0)).sum(dim=2)
+        
+        # Rank trong tập All (Mẫu số)
+        rank_all = 1 + (sigmoid_diff * all_mask.unsqueeze(0)).sum(dim=2)
+
+        # 6. Tính AP
+        ap_ratio = rank_pos / (rank_all + 1e-8)
+        
+        # Chỉ tính tổng AP cho các cặp Positive
+        ap_sum = (ap_ratio * pos_mask).sum(dim=1)
+        
+        # Chia cho số lượng positive (|IP|)
+        num_pos = pos_mask.sum(dim=1)
+        ap_q = ap_sum / (num_pos + 1e-8)
+
+        # 7. Final Loss (Minimize 1 - Mean AP)
+        loss = 1 - ap_q.mean()
+        
+        return loss
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class DistillationLoss(nn.Module):
+    def __init__(self, reduction="mean"):
+        super().__init__()
+        self.reduction = reduction
+
+    def forward(self, z_student, z_teacher):
+        """
+        Args:
+            z_student: (B, D) - output từ student
+            z_teacher: (B, D) - output từ EMA teacher (no grad)
+        """
+        # Normalize
+        z_student = F.normalize(z_student, dim=1)
+        z_teacher = F.normalize(z_teacher, dim=1)
+
+        # Cosine similarity loss
+        loss = 1.0 - (z_student * z_teacher).sum(dim=1)
+
+        if self.reduction == "mean":
+            return loss.mean()
+        elif self.reduction == "sum":
+            return loss.sum()
+        else:
+            return loss
+
+class DenseLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+        
+    def forward(self, anchor_tokens, pos_tokens, temperature=0.1):
+        """
+        anchor_tokens: (B, K, D)   queries
+        pos_tokens:    (B, K, D)   positives
+        negatives: in-batch
+        """
+        B, K, D = anchor_tokens.shape
+
+        # flatten patches as separate queries
+        q = anchor_tokens.reshape(B * K, D)
+        k_pos = pos_tokens.reshape(B * K, D)
+
+        # positive logits
+        pos_logits = torch.sum(q * k_pos, dim=-1, keepdim=True)  # (BK, 1)
+
+        # negatives: all other positives in batch
+        k_all = k_pos.detach()  # (BK, D)
+        neg_logits = q @ k_all.t()  # (BK, BK)
+
+        # mask self
+        mask = torch.eye(B * K, device=q.device).bool()
+        neg_logits.masked_fill_(mask, float("-inf"))
+
+        logits = torch.cat([pos_logits, neg_logits], dim=1)
+        logits /= temperature
+
+        labels = torch.zeros(B * K, dtype=torch.long, device=q.device)
+
+        loss = F.cross_entropy(logits, labels)
+        return loss
