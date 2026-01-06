@@ -612,16 +612,17 @@ class Trainer:
                     negative_samples = NegSamplerRandomly(x_pos_1)
                 else:
                     if (epoch + 1) == self.warm_up_epochs:
-                        if batch_id == 0:
-                            self.negative_batch_idx = []
+                        # if batch_id == 0:
+                        #     self.negative_batch_idx = []
 
-                            B = x_anchor.shape[0]
-                            v = prev_margin_violations/B
-                            x = max(2, math.floor((1 - v) * 10))
-                            y = x + 5
-                            random_k = random.randint(x, y)
-                            total_k = random_k
-                            print(f"\n=>[x, y] = [{x}, {y}]\n")
+                        #     B = x_anchor.shape[0]
+                        #     v = prev_margin_violations/B
+                        #     x = max(2, math.floor((1 - v) * 10))
+                        #     y = x + 5
+                        #     random_k = random.randint(x, y)
+                        #     total_k = random_k
+                        #     print(f"\n=>[x, y] = [{x}, {y}]\n")
+                        total_k = random_k = 15
                             
                         self.negative_batch_idx.append(NegSamplerStatic(self.model, x_pos_1, k=total_k)) # negative with momentum model
                     
@@ -688,42 +689,37 @@ class Trainer:
                 running_neg_dist += neg_dist.mean().item()
                 running_margin_violations += violations.sum().item()
                 
-                # if self.warm_up_epochs > epoch + 1:
-                #     neg_batch = NegSamplerRandomly(anchor_batch_s)
-                # else:
-                #     neg_batch = anchor_batch_s[self.negative_batch_idx[batch_id]]
-                
-                #Forward triplet loss
-            with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
-                if self.warm_up_epochs > epoch + 1:
-                    triplet_loss = self.triplet_loss_stage1(anchor_batch, pos_batch, neg_batch)
+                # Forward triplet loss
+                if self.ablation != "No_Triplet":
+                    with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+                        if self.warm_up_epochs > epoch + 1:
+                            triplet_loss = self.triplet_loss_stage1(anchor_batch, pos_batch, neg_batch)
+                        else:
+                            triplet_loss = self.triplet_loss_stage2(anchor_batch, pos_batch, neg_batch)
                 else:
-                    triplet_loss = self.triplet_loss_stage2(anchor_batch, pos_batch, neg_batch)
-                
-                # Forward distillation loss
-                #distillation_loss = self.criterion2(anchor_batch_s, anchor_batch_t)
+                    triplet_loss = 0.0
                 
                 # Forward contrastive loss
                 contrastive_loss = self.criterion1(pos_batch, anchor_batch)
                 
                 # Forward MSE losss
-                mse_loss = F.mse_loss(pos_batch, masked_pos_batch, reduction='mean')
+                if self.ablation != "No_MSE":
+                    mse_loss = F.mse_loss(pos_batch, masked_pos_batch, reduction='mean')
+                else:
+                    mse_loss =0 .0
                 
-                # Forward positive ranking loss
-                #ranking_loss = self.criterion5(torch.cat([anchor_ranking, pos_batch_ranking, pos_batch_2_ranking], dim=0))
-                
-                # Forward dense loss
-                #dense_loss = self.criterion3(anchor_patch, pos_patch)
                 
                 # Total loss
-                total_loss = contrastive_loss + 0.5*triplet_loss + 0.2*mse_loss
+                if self.ablation == "No_Triplet":
+                    total_loss = contrastive_loss + 0.2*mse_loss
+                elif self.ablation == "No_MSE":
+                    total_loss = contrastive_loss + 0.5*triplet_loss
+                else:
+                    total_loss = contrastive_loss + 0.5*triplet_loss + 0.2*mse_loss
                 
                 running_loss_contrastive += contrastive_loss.item()
                 running_loss_triplet += triplet_loss.item()
                 running_loss_mse += mse_loss.item()
-                #running_loss_dense += dense_loss.item()
-                #running_loss_ranking += ranking_loss.item()
-                #running_loss_distillation += distillation_loss.item()
                 running_loss_total += total_loss.item()
 
             scaler.scale(total_loss).backward()
