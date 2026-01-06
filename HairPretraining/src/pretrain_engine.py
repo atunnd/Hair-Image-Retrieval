@@ -607,7 +607,7 @@ class Trainer:
             # if self.multi_view:
             #     x_pos_3 = images['pos3'].to(self.device) 
             
-            if self.ablation == "None" or self.ablation == "fixed_margin_0_5" or  self.ablation == "fixed_margin_0_7":
+            if self.ablation != "None" or self.ablation == "fixed_margin_0_5" or  self.ablation == "fixed_margin_0_7":
                 if self.warm_up_epochs > epoch + 1:     #STAGE 1: RANDOMLY NEGATIVE MINING
                     negative_samples = NegSamplerRandomly(x_pos_1)
                 else:
@@ -688,25 +688,24 @@ class Trainer:
                 running_post_dist += pos_dist.mean().item()
                 running_neg_dist += neg_dist.mean().item()
                 running_margin_violations += violations.sum().item()
-                
+
+            with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
                 # Forward triplet loss
                 if self.ablation != "No_Triplet":
-                    with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
                         if self.warm_up_epochs > epoch + 1:
                             triplet_loss = self.triplet_loss_stage1(anchor_batch, pos_batch, neg_batch)
                         else:
                             triplet_loss = self.triplet_loss_stage2(anchor_batch, pos_batch, neg_batch)
-                else:
-                    triplet_loss = 0.0
+                        running_loss_triplet += triplet_loss.item()
                 
                 # Forward contrastive loss
                 contrastive_loss = self.criterion1(pos_batch, anchor_batch)
+                running_loss_contrastive += contrastive_loss.item()
                 
                 # Forward MSE losss
                 if self.ablation != "No_MSE":
                     mse_loss = F.mse_loss(pos_batch, masked_pos_batch, reduction='mean')
-                else:
-                    mse_loss =0 .0
+                    running_loss_mse += mse_loss.item()
                 
                 
                 # Total loss
@@ -717,9 +716,7 @@ class Trainer:
                 else:
                     total_loss = contrastive_loss + 0.5*triplet_loss + 0.2*mse_loss
                 
-                running_loss_contrastive += contrastive_loss.item()
-                running_loss_triplet += triplet_loss.item()
-                running_loss_mse += mse_loss.item()
+                
                 running_loss_total += total_loss.item()
 
             scaler.scale(total_loss).backward()
