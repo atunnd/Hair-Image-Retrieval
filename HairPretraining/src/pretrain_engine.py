@@ -602,23 +602,12 @@ class Trainer:
             # if self.multi_view:
             #     x_pos_3 = images['pos3'].to(self.device) 
             
-            if self.ablation == "None" or self.ablation != "randomly" or  self.ablation != "fixed_hard":
+            if self.ablation != "randomly" and self.ablation != "fixed_hard":
                 if self.warm_up_epochs > epoch + 1:     #STAGE 1: RANDOMLY NEGATIVE MINING
                     negative_samples = NegSamplerRandomly(x_pos_1)
                 else:
                     if (epoch + 1) == self.warm_up_epochs:
-                        # if batch_id == 0:
-                        #     self.negative_batch_idx = []
-
-                        #     B = x_anchor.shape[0]
-                        #     v = prev_margin_violations/B
-                        #     x = max(2, math.floor((1 - v) * 10))
-                        #     y = x + 5
-                        #     random_k = random.randint(x, y)
-                        #     total_k = random_k
-                        #     print(f"\n=>[x, y] = [{x}, {y}]\n")
                         total_k = random_k = self.k
-                            
                         self.negative_batch_idx.append(NegSamplerStatic(self.model, x_pos_1, k=total_k)) # negative with momentum model
                     
                         if batch_id == len(self.train_loader) - 1:

@@ -20,7 +20,7 @@ python mainpretrain.py \
   --model resnet50 \
   --seed 42 \
   --num_workers 16 \
-  --warm_up_epochs 1 \
+  --warm_up_epochs 20 \
   --ablation No_MSE \
   
 

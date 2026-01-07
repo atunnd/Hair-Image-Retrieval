@@ -21,7 +21,8 @@ python mainpretrain.py \
   --seed 42 \
   --num_workers 16 \
   --warm_up_epochs 20 \
-  --ablation No_Triplet \
+  --k 7 \
+
   
 
 
