@@ -185,7 +185,7 @@ class Trainer:
                 elif self.ablation != "None":
                     self.save_path = os.path.join(self.save_path, f"{self.mode}_{self.mode_model}_ablation_{self.ablation}_k_{self.k}") 
                 else:
-                    self.save_path = os.path.join(self.save_path, f"{self.mode}_{self.mode_model}_k_{self.k}")    
+                    self.save_path = os.path.join(self.save_path, f"{self.mode}_{self.mode_model}")    
             else: 
                 if args.full_face_training:
                     self.save_path = os.path.join(self.save_path, f"{self.mode}_{self.mode_model}_full_face_training")
